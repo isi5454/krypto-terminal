@@ -789,9 +789,9 @@ with tab_beobachtung:
         kategorie = daten["kategorie"]
         score = daten["score"]
         if kategorie.startswith("Stark bullisch") or kategorie.startswith("Leicht bullisch"):
-            ampel, ampel_text = "🟢", "Bullische Signale"
+            ampel, ampel_text = "🟢", "Bullische Signale (Long-Tendenz)"
         elif kategorie.startswith("Stark bärisch") or kategorie.startswith("Leicht bärisch"):
-            ampel, ampel_text = "🔴", "Bärische Signale"
+            ampel, ampel_text = "🔴", "Bärische Signale (Short-Tendenz)"
         else:
             ampel, ampel_text = "🟡", "Neutral"
 
@@ -834,7 +834,8 @@ with tab_beobachtung:
 
             with c1:
                 st.write("🎯 Signal-Score:")
-                anzeige = f"{kategorie} ({score:+d}/6)"
+                zusatz = " (Long-Tendenz)" if ampel == "🟢" else " (Short-Tendenz)" if ampel == "🔴" else ""
+                anzeige = f"{kategorie}{zusatz} ({score:+d}/6)"
                 if ampel == "🟢":
                     st.success(f"🟢 {anzeige}")
                 elif ampel == "🔴":
