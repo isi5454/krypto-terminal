@@ -418,7 +418,7 @@ def coin_daten_laden(ticker: str, intervall_label: str):
         return None
     tage = TIMEFRAME_ZU_TAGE.get(intervall_label, 7)
     df = coingecko_ohlc_holen(coingecko_id, tage)
-    if df is None or df.empty or len(df) < 55:
+    if df is None or df.empty or len(df) < 20:
         return None
 
     closes = df["close"].tolist()
