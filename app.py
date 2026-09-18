@@ -120,6 +120,7 @@ def zustand_laden():
         record.setdefault("watchlist", ["BTC", "ETH", "SOL"])
         record.setdefault("portfolio", [])
         record.setdefault("alerts", [])
+        record.setdefault("hypo_trades", {"offen": [], "geschlossen": []})
         if "PAXG" not in record["watchlist"]:
             record["watchlist"].append("PAXG")
             try:
@@ -418,6 +419,78 @@ def bollinger_baender_serie(werte, periode=20, anzahl_std=2):
     return mittel, mittel + anzahl_std * std, mittel - anzahl_std * std
 
 
+def atr_wert(highs, lows, closes, periode=14):
+    """Aktueller ATR als absoluter Preis-Betrag (nicht Prozent) - für Stop/Ziel bei
+    hypothetischen Positionen im Vorwärts-Tracking."""
+    if len(closes) < periode + 1:
+        return None
+    h = pd.Series(highs)
+    l = pd.Series(lows)
+    c = pd.Series(closes)
+    prev_close = c.shift(1)
+    tr = pd.concat([h - l, (h - prev_close).abs(), (l - prev_close).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(periode).mean().iloc[-1]
+    return float(atr) if pd.notna(atr) else None
+
+
+def hypo_trades_aktualisieren(ticker, daten):
+    """Vorwärts-Tracking: protokolliert, was passiert wäre, wenn man jedem starken
+    Signal gefolgt wäre. Läuft nur, wenn die App offen ist (kein 24/7 wie die Alarme).
+    Ziel/Stop nach ATR, ähnlich der Logik aus dem Vergleichs-Tool des Kollegen."""
+    hypo = st.session_state.zustand.setdefault("hypo_trades", {"offen": [], "geschlossen": []})
+    veraendert = False
+    preis = daten["preis"]
+
+    for trade in [t for t in hypo["offen"] if t["ticker"] == ticker]:
+        ausgeloest = None
+        if trade["richtung"] == "long":
+            if preis >= trade["ziel"]:
+                ausgeloest = "Ziel erreicht"
+            elif preis <= trade["stop"]:
+                ausgeloest = "Stop erreicht"
+        else:
+            if preis <= trade["ziel"]:
+                ausgeloest = "Ziel erreicht"
+            elif preis >= trade["stop"]:
+                ausgeloest = "Stop erreicht"
+
+        eroeffnet = datetime.fromisoformat(trade["eroeffnet_am"])
+        if ausgeloest is None and (datetime.now(timezone.utc) - eroeffnet).days >= 30:
+            ausgeloest = "Zeit abgelaufen"
+
+        if ausgeloest:
+            veraenderung_pct = (
+                (preis - trade["einstieg"]) / trade["einstieg"] * 100 if trade["richtung"] == "long"
+                else (trade["einstieg"] - preis) / trade["einstieg"] * 100
+            )
+            hypo["geschlossen"].insert(0, {
+                **trade, "ausstieg": preis, "ergebnis": ausgeloest,
+                "veraenderung_pct": veraenderung_pct,
+                "geschlossen_am": datetime.now(timezone.utc).isoformat(),
+            })
+            hypo["geschlossen"] = hypo["geschlossen"][:50]
+            hypo["offen"] = [t for t in hypo["offen"] if t["id"] != trade["id"]]
+            veraendert = True
+
+    hat_offene = any(t["ticker"] == ticker for t in hypo["offen"])
+    if not hat_offene and daten["kategorie"] in ("Stark bullisch", "Stark bärisch"):
+        atr = atr_wert(daten["highs"], daten["lows"], daten["closes"])
+        if atr:
+            einstieg = daten["preis_signal"]
+            richtung = "long" if daten["kategorie"] == "Stark bullisch" else "short"
+            stop = einstieg - atr if richtung == "long" else einstieg + atr
+            ziel = einstieg + atr * 2 if richtung == "long" else einstieg - atr * 2
+            hypo["offen"].append({
+                "id": str(uuid.uuid4())[:8], "ticker": ticker, "richtung": richtung,
+                "einstieg": einstieg, "stop": stop, "ziel": ziel,
+                "eroeffnet_am": datetime.now(timezone.utc).isoformat(),
+            })
+            veraendert = True
+
+    if veraendert:
+        zustand_speichern()
+
+
 def coin_daten_laden(ticker: str, intervall_label: str):
     coingecko_id = coingecko_id_ermitteln(ticker)
     if not coingecko_id:
@@ -572,6 +645,8 @@ with tab_beobachtung:
             st.error(f"**{ticker}**: Keine Daten verfügbar (API nicht erreichbar, Rate-Limit, unbekanntes Kürzel oder zu wenig Historie).")
             continue
 
+        hypo_trades_aktualisieren(ticker, daten)
+
         kategorie = daten["kategorie"]
         score = daten["score"]
         if kategorie.startswith("Stark bullisch") or kategorie.startswith("Leicht bullisch"):
@@ -676,6 +751,50 @@ with tab_beobachtung:
                     st.write(f"Ø Veränderung: **{ergebnis['durchschnitt']:+.2f}%**")
                     st.write(f"Beste / schlechteste Entwicklung: **{ergebnis['bester']:+.2f}%** / **{ergebnis['schlechtester']:+.2f}%**")
                     st.caption("Reine Vergangenheitsstatistik dieses Coins – keine Vorhersage für das nächste Mal.")
+
+    st.markdown("---")
+    with st.expander("📈 Vorwärts-Tracking: Wie hätten die Signale seitdem abgeschnitten?", expanded=False):
+        st.caption(
+            "Seit du diese App nutzt, wird automatisch mitgeschrieben: Zeigt ein Coin 'Stark bullisch/bärisch', "
+            "wird notiert, was passiert wäre, wenn du dem gefolgt wärst (Ziel = Einstieg ± 2×ATR, "
+            "Stop = Einstieg ∓ 1×ATR, Zeit-Ablauf nach 30 Tagen). "
+            "Läuft nur, während die App offen ist – anders als die Telegram-Alarme kein 24/7-Hintergrundprozess."
+        )
+        hypo = st.session_state.zustand.get("hypo_trades", {"offen": [], "geschlossen": []})
+        offen_liste = hypo.get("offen", [])
+        geschlossen_liste = hypo.get("geschlossen", [])
+
+        ziel_treffer = sum(1 for t in geschlossen_liste if t["ergebnis"] == "Ziel erreicht")
+        stop_treffer = sum(1 for t in geschlossen_liste if t["ergebnis"] == "Stop erreicht")
+        zeit_treffer = sum(1 for t in geschlossen_liste if t["ergebnis"] == "Zeit abgelaufen")
+        avg_veraenderung = (
+            sum(t["veraenderung_pct"] for t in geschlossen_liste) / len(geschlossen_liste)
+            if geschlossen_liste else 0
+        )
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Offen", len(offen_liste))
+        m2.metric("Ziel / Stop / Zeit", f"{ziel_treffer}/{stop_treffer}/{zeit_treffer}")
+        m3.metric("Geschlossen gesamt", len(geschlossen_liste))
+        m4.metric("Ø Veränderung", f"{avg_veraenderung:+.2f}%")
+
+        if offen_liste:
+            st.write("**Offene hypothetische Positionen:**")
+            for t in offen_liste:
+                st.write(
+                    f"{t['ticker']} — **{t['richtung'].upper()}** @ $ {t['einstieg']:,.2f} "
+                    f"(Ziel $ {t['ziel']:,.2f} / Stop $ {t['stop']:,.2f})"
+                )
+        if geschlossen_liste:
+            st.write("**Letzte geschlossene:**")
+            for t in geschlossen_liste[:10]:
+                zeichen = "🟢" if t["veraenderung_pct"] > 0 else "🔴"
+                st.write(
+                    f"{zeichen} {t['ticker']} {t['richtung'].upper()}: {t['ergebnis']} "
+                    f"({t['veraenderung_pct']:+.2f}%)"
+                )
+        if not offen_liste and not geschlossen_liste:
+            st.info("Noch keine hypothetischen Positionen – entsteht automatisch beim nächsten starken Signal.")
 
     if st.button("🗑️ Watchlist zurücksetzen (Nur Core-Coins)", key="reset_btn"):
         st.session_state.zustand["watchlist"] = ["BTC", "ETH", "SOL", "PAXG"]
