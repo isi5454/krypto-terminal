@@ -242,9 +242,10 @@ def coingecko_id_ermitteln(ticker: str):
 @st.cache_data(ttl=60, show_spinner=False)
 def cryptocompare_ohlc_holen(ticker: str, endpoint: str, aggregate: int, limit: int = 300):
     """Echte OHLC-Kerzen (inkl. Volumen) von CryptoCompare - liefert Minuten-,
-    Stunden- oder Tages-Granularität je nach endpoint/aggregate."""
+    Stunden- oder Tages-Granularität je nach endpoint/aggregate.
+    Gibt (DataFrame, Fehlermeldung) zurück - Fehlermeldung ist None bei Erfolg."""
     if not CRYPTOCOMPARE_API_KEY:
-        return None
+        return None, "Kein CryptoCompare-Key in den Secrets gesetzt."
     try:
         r = requests.get(
             f"{CRYPTOCOMPARE_BASIS}/{endpoint}",
@@ -257,25 +258,25 @@ def cryptocompare_ohlc_holen(ticker: str, endpoint: str, aggregate: int, limit: 
         r.raise_for_status()
         antwort = r.json()
         if antwort.get("Response") != "Success":
-            return None
+            return None, f"CryptoCompare-Fehler: {antwort.get('Message', 'unbekannt')}"
         rohdaten = antwort.get("Data", {}).get("Data", [])
-    except requests.RequestException:
-        return None
+    except requests.RequestException as e:
+        return None, f"Netzwerk-/HTTP-Fehler: {e}"
     if not rohdaten:
-        return None
+        return None, "Antwort enthielt keine Kursdaten."
     df = pd.DataFrame(rohdaten)
     if "close" not in df.columns:
-        return None
+        return None, "Unerwartetes Antwortformat (keine 'close'-Spalte)."
     df = df[df["close"] > 0].reset_index(drop=True)  # CryptoCompare füllt fehlende Perioden manchmal mit Nullzeilen
     if df.empty or len(df) < 20:
-        return None
+        return None, f"Nur {len(df)} gültige Datenpunkte (von {len(rohdaten)} erhaltenen) – zu wenig."
     df["zeit"] = pd.to_datetime(df["time"], unit="s")
     df = df.rename(columns={"volumeto": "volumen"})
-    return df[["zeit", "open", "high", "low", "close", "volumen"]]
+    return df[["zeit", "open", "high", "low", "close", "volumen"]], None
 
 
 def cryptocompare_symbol_gueltig(ticker: str) -> bool:
-    df = cryptocompare_ohlc_holen(ticker, "histoday", 1, limit=10)
+    df, _ = cryptocompare_ohlc_holen(ticker, "histoday", 1, limit=10)
     return df is not None and not df.empty
 
 
@@ -615,9 +616,9 @@ def hypo_trades_aktualisieren(ticker, daten):
 
 def coin_daten_laden(ticker: str, intervall_label: str):
     endpoint, aggregate = TIMEFRAME_OPTIONEN.get(intervall_label, ("histohour", 1))
-    df = cryptocompare_ohlc_holen(ticker, endpoint, aggregate)
-    if df is None or df.empty or len(df) < 20:
-        return None
+    df, fehler = cryptocompare_ohlc_holen(ticker, endpoint, aggregate)
+    if df is None or df.empty:
+        return None, (fehler or "Unbekannter Fehler.")
 
     closes_chart = df["close"].tolist()
     highs_chart = df["high"].tolist()
@@ -661,7 +662,7 @@ def coin_daten_laden(ticker: str, intervall_label: str):
         "volumen_schnitt": pd.Series(volumen_liste).rolling(min(20, max(len(volumen_liste) - 1, 1))).mean().iloc[-1] if volumen_liste else None,
         "closes": closes, "highs": highs, "lows": lows,
         "fib_level": fib_level, "fib_naechstes": fib_naechstes,
-    }
+    }, None
 
 
 def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True, projektion=None, aktueller_preis=None, vorschau=5):
@@ -785,11 +786,11 @@ with tab_beobachtung:
             del st.session_state[select_key]  # alte Auswahl aus vorheriger Zeitraum-Umstellung verwerfen
         aktueller_zeitraum = st.session_state.get(select_key, optionen[1])
         with st.spinner(f"Lade {ticker}…"):
-            daten = coin_daten_laden(ticker, aktueller_zeitraum)
+            daten, fehler = coin_daten_laden(ticker, aktueller_zeitraum)
 
         st.markdown("---")
         if daten is None:
-            st.error(f"**{ticker}**: Keine Daten verfügbar (API nicht erreichbar, Rate-Limit, unbekanntes Kürzel oder zu wenig Historie).")
+            st.error(f"**{ticker}**: Keine Daten verfügbar – Grund: {fehler}")
             continue
 
         hypo_trades_aktualisieren(ticker, daten)
@@ -1156,7 +1157,7 @@ with tab_sitzungen:
                 )
 
                 with st.spinner("Lade aktuelles Signal…"):
-                    live_daten = coin_daten_laden(coin_auswahl, "🕐 1 Stunde")
+                    live_daten, live_fehler = coin_daten_laden(coin_auswahl, "🕐 1 Stunde")
 
                 if live_daten:
                     live_kat = live_daten["kategorie"]
@@ -1168,7 +1169,7 @@ with tab_sitzungen:
                         live_ampel, live_text = "🟡", "Neutral"
                     st.write(f"**Aktuelles Live-Signal ({coin_auswahl}):** {live_ampel} {live_text} ({live_daten['score']:+d}/6)")
                 else:
-                    st.warning(f"Aktuelles Live-Signal für {coin_auswahl} nicht verfügbar.")
+                    st.warning(f"Aktuelles Live-Signal für {coin_auswahl} nicht verfügbar – Grund: {live_fehler}")
 
                 jetzt_stunde = jetzt_utc.hour
                 ny_start = SITZUNGEN["🇺🇸 Amerika (New York)"]["start_utc"]
