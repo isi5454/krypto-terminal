@@ -772,7 +772,10 @@ with tab_beobachtung:
     optionen = list(TIMEFRAME_OPTIONEN.keys())
 
     for ticker in list(watchlist):
-        aktueller_zeitraum = st.session_state.get(f"select_{ticker}", optionen[1])
+        select_key = f"select_{ticker}"
+        if select_key in st.session_state and st.session_state[select_key] not in optionen:
+            del st.session_state[select_key]  # alte Auswahl aus vorheriger Zeitraum-Umstellung verwerfen
+        aktueller_zeitraum = st.session_state.get(select_key, optionen[1])
         with st.spinner(f"Lade {ticker}…"):
             daten = coin_daten_laden(ticker, aktueller_zeitraum)
 
