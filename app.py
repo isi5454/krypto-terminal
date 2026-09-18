@@ -51,6 +51,39 @@ SITZUNGEN = {
 }
 LOKALE_ZEITZONE = "Europe/Vienna"
 
+# --- 📈 AKTIEN (Finnhub) ---
+# Wichtig: Finnhub gibt auf dem kostenlosen Plan keine historischen Kerzen für
+# Aktien frei (getestet: "error" bei /stock/candle) - deshalb hier nur der
+# Live-Snapshot über /quote, keine Indikatoren/Signale wie bei Krypto/Gold.
+FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "")
+FINNHUB_BASIS = "https://finnhub.io/api/v1"
+AKTIEN_TICKER = ["AAPL", "NVDA", "TSLA"]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def finnhub_quote_holen(symbol: str):
+    if not FINNHUB_API_KEY:
+        return None
+    try:
+        r = requests.get(f"{FINNHUB_BASIS}/quote", params={"symbol": symbol, "token": FINNHUB_API_KEY}, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException:
+        return None
+
+
+def aktien_snapshot_auswerten(quote):
+    if not quote or quote.get("c") in (None, 0):
+        return None
+    preis = quote["c"]
+    pc = quote.get("pc") or 0
+    o = quote.get("o") or 0
+    return {
+        "preis": preis,
+        "veraenderung_tag": (preis - pc) / pc * 100 if pc else None,
+        "veraenderung_seit_open": (preis - o) / o * 100 if o else None,
+    }
+
 
 def sitzungs_status():
     jetzt_utc = datetime.now(timezone.utc)
@@ -90,7 +123,7 @@ def stunden_analyse(punkte, vorschau_stunden=2):
     Reine Vergangenheitsstatistik, keine Vorhersage - Grundlage für die grafische
     24h-Übersicht (ersetzt die einzelnen Sitzungs-Expander durch EIN Bild)."""
     if len(punkte) < 50:
-        return None
+        return {"grund": "keine_daten"}
     zeiten = [datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc) for p in punkte]
     preise = [p[1] for p in punkte]
     veraenderungen_je_stunde = {h: [] for h in range(24)}
@@ -98,15 +131,17 @@ def stunden_analyse(punkte, vorschau_stunden=2):
         stunde = zeiten[i].hour
         veraenderung = (preise[i + vorschau_stunden] - preise[i]) / preise[i] * 100
         veraenderungen_je_stunde[stunde].append(veraenderung)
-    ergebnis = {}
+    stunden_werte = {}
     for h, werte in veraenderungen_je_stunde.items():
         if len(werte) >= 5:
-            ergebnis[h] = {
+            stunden_werte[h] = {
                 "durchschnitt": sum(werte) / len(werte),
                 "anzahl": len(werte),
                 "prozent_positiv": sum(1 for w in werte if w > 0) / len(werte) * 100,
             }
-    return ergebnis if ergebnis else None
+    if not stunden_werte:
+        return {"grund": "zu_wenig_pro_stunde"}
+    return {"grund": "ok", "stunden": stunden_werte}
 
 
 def stunden_chart(ergebnis, ziel_zone=LOKALE_ZEITZONE):
@@ -1063,10 +1098,17 @@ with tab_sitzungen:
             with st.spinner("Werte Historie aus…"):
                 punkte = coingecko_preise_mit_zeit_holen(coingecko_id, tage=90)
 
-            ergebnis = stunden_analyse(punkte, vorschau_stunden)
-            if ergebnis is None:
-                st.info("Nicht genug historische Daten für eine verlässliche Aussage.")
+            analyse = stunden_analyse(punkte, vorschau_stunden)
+            if analyse["grund"] == "keine_daten":
+                st.warning(
+                    "Keine Kursdaten von CoinGecko erhalten – meist ein kurzes Rate-Limit "
+                    "(z. B. nach vielen Anfragen im Beobachtung-Tab). Kurz warten und "
+                    "\"🔄 Daten neu laden\" oben klicken, oder Seite neu laden."
+                )
+            elif analyse["grund"] == "zu_wenig_pro_stunde":
+                st.info("Zu wenig historische Vorkommen pro Stunde für eine verlässliche Aussage.")
             else:
+                ergebnis = analyse["stunden"]
                 st.plotly_chart(stunden_chart(ergebnis), use_container_width=True)
                 bullischste = max(ergebnis.items(), key=lambda kv: kv[1]["durchschnitt"])
                 baerischste = min(ergebnis.items(), key=lambda kv: kv[1]["durchschnitt"])
@@ -1084,6 +1126,29 @@ with tab_sitzungen:
             st.warning("Coin konnte nicht aufgelöst werden.")
     else:
         st.info("Noch keine Coins auf der Watchlist (Reiter 📊 Beobachtung).")
+
+    st.markdown("---")
+    st.subheader("📈 Aktien – Live-Snapshot")
+    if not FINNHUB_API_KEY:
+        st.info("Finnhub-Key noch nicht in den Secrets eingetragen (FINNHUB_API_KEY) – dieser Bereich bleibt bis dahin leer.")
+    else:
+        st.caption(
+            "Finnhub bietet auf dem kostenlosen Plan keine historischen Kerzen für Aktien – deshalb nur "
+            "der aktuelle Live-Stand, keine Indikatoren, kein Signal-Score wie bei Krypto/Gold."
+        )
+        for symbol in AKTIEN_TICKER:
+            quote = finnhub_quote_holen(symbol)
+            snapshot = aktien_snapshot_auswerten(quote)
+            if snapshot is None:
+                st.warning(f"{symbol}: Keine Daten verfügbar (Rate-Limit oder API nicht erreichbar).")
+                continue
+            zeichen = "🟢" if (snapshot["veraenderung_tag"] or 0) >= 0 else "🔴"
+            tag_text = f"{snapshot['veraenderung_tag']:+.2f}%" if snapshot["veraenderung_tag"] is not None else "—"
+            open_text = f"{snapshot['veraenderung_seit_open']:+.2f}%" if snapshot["veraenderung_seit_open"] is not None else "—"
+            st.write(
+                f"{zeichen} **{symbol}**: $ {snapshot['preis']:,.2f} — "
+                f"seit Vortagesschluss **{tag_text}** — seit Markteröffnung heute **{open_text}**"
+            )
 
 # ============================== TAB 5: TOP BEWEGUNGEN ==============================
 with tab_bewegungen:
