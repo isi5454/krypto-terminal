@@ -245,6 +245,51 @@ def fear_greed_index_holen():
         return None, None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def coingecko_markt_uebersicht(seiten: int = 2):
+    """Viele Coins mit 1h/24h-%-Veränderung für die Top-Bewegungen-Übersicht.
+    Scannt die Top (seiten×250) Coins nach Marktkapitalisierung."""
+    alle = []
+    for seite in range(1, seiten + 1):
+        try:
+            r = requests.get(
+                f"{COINGECKO_BASIS}/coins/markets",
+                params={
+                    "vs_currency": "usd", "order": "market_cap_desc",
+                    "per_page": 250, "page": seite,
+                    "price_change_percentage": "1h,24h", "sparkline": "false",
+                },
+                timeout=15,
+            )
+            r.raise_for_status()
+            daten = r.json()
+            if not daten:
+                break
+            alle.extend(daten)
+        except requests.RequestException:
+            break
+    return alle
+
+
+def top_bewegungen(marktdaten, zeitraum="24h", schwelle=10.0, anzahl=10):
+    """Filtert/sortiert Coins nach absoluter %-Veränderung (beide Richtungen)."""
+    feld = "price_change_percentage_1h_in_currency" if zeitraum == "1h" else "price_change_percentage_24h_in_currency"
+    kandidaten = []
+    for coin in marktdaten:
+        veraenderung = coin.get(feld)
+        if veraenderung is None:
+            continue
+        if abs(veraenderung) >= schwelle:
+            kandidaten.append({
+                "symbol": coin.get("symbol", "").upper(),
+                "name": coin.get("name"),
+                "preis": coin.get("current_price"),
+                "veraenderung": veraenderung,
+            })
+    kandidaten.sort(key=lambda k: abs(k["veraenderung"]), reverse=True)
+    return kandidaten[:anzahl]
+
+
 # --- 📐 INDIKATOREN ALS VOLLSTÄNDIGE ZEITREIHEN (für aktuelle Anzeige UND Backtest) ---
 
 def indikator_serien_berechnen(closes, highs, lows):
@@ -630,8 +675,8 @@ st.caption(
     "Signale sind statistische Tendenzen aus der Vergangenheit, keine Garantie."
 )
 
-tab_beobachtung, tab_portfolio, tab_alarme, tab_sitzungen = st.tabs(
-    ["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme", "🌍 Handelssitzungen"]
+tab_beobachtung, tab_portfolio, tab_alarme, tab_sitzungen, tab_bewegungen = st.tabs(
+    ["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme", "🌍 Handelssitzungen", "🔥 Top Bewegungen"]
 )
 
 # ============================== TAB 1: BEOBACHTUNG ==============================
@@ -1039,3 +1084,43 @@ with tab_sitzungen:
             st.warning("Coin konnte nicht aufgelöst werden.")
     else:
         st.info("Noch keine Coins auf der Watchlist (Reiter 📊 Beobachtung).")
+
+# ============================== TAB 5: TOP BEWEGUNGEN ==============================
+with tab_bewegungen:
+    st.subheader("🔥 Größte Marktbewegungen")
+    st.caption(
+        "Scannt die Top 500 Coins nach Marktkapitalisierung auf CoinGecko nach den stärksten "
+        "Ausschlägen in beide Richtungen. Reine Kursbewegung – **keine Kauf-/Verkaufsempfehlung.**"
+    )
+
+    c1, c2, c3 = st.columns(3)
+    zeitraum_anzeige = c1.selectbox("Zeitraum:", options=["1 Stunde", "24 Stunden"], index=1, key="bewegung_zeitraum")
+    schwelle = c2.number_input("Mindest-Veränderung (%):", min_value=1.0, value=10.0, step=5.0, key="bewegung_schwelle")
+    anzahl = c3.slider("Wie viele anzeigen?", min_value=5, max_value=10, value=10, key="bewegung_anzahl")
+
+    if st.button("🔄 Markt neu scannen", key="bewegung_scan_btn"):
+        coingecko_markt_uebersicht.clear()
+        st.rerun()
+
+    with st.spinner("Scanne Markt (Top 500 Coins)…"):
+        marktdaten = coingecko_markt_uebersicht(seiten=2)
+
+    if not marktdaten:
+        st.error("Marktdaten aktuell nicht abrufbar (API nicht erreichbar oder Rate-Limit).")
+    else:
+        zeitraum_code = "1h" if zeitraum_anzeige == "1 Stunde" else "24h"
+        treffer = top_bewegungen(marktdaten, zeitraum_code, schwelle, anzahl)
+
+        if not treffer:
+            st.info(
+                f"Aktuell kein Coin unter den Top 500 mit {schwelle:.0f}%+ Veränderung in {zeitraum_anzeige}. "
+                "Das ist normal – so starke Bewegungen sind selten. Schwellenwert oben ggf. senken."
+            )
+        else:
+            st.caption(f"{len(treffer)} Treffer, sortiert nach Stärke der Bewegung ({zeitraum_anzeige}):")
+            for coin in treffer:
+                richtung = "🟢" if coin["veraenderung"] > 0 else "🔴"
+                st.write(
+                    f"{richtung} **{coin['symbol']}** ({coin['name']}) — "
+                    f"$ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%** ({zeitraum_anzeige})"
+                )
