@@ -278,11 +278,6 @@ def indikator_serien_berechnen(closes, highs, lows):
     }
 
 
-def score_bei_index(serien, closes, i):
-    """Kombiniert 5 Indikatoren zu einem Score (-5 bis +5) und liefert die Gründe
-    in Klartext. Rein beschreibend, was die Indikatoren JETZT zeigen -
-    keine Vorhersage und keine Handlungsempfehlung."""
-    preis = closes[i]
 def score_bei_index(serien, closes, highs, lows, i, fib_fenster=100):
     """Kombiniert 6 Indikatoren zu einem Score (-6 bis +6) und liefert die Gründe
     in Klartext. Rein beschreibend, was die Indikatoren JETZT zeigen -
@@ -368,7 +363,7 @@ def backtest_kategorie(closes, highs, lows, ziel_kategorie, vorschau=5):
     start = 50
     ende = n - vorschau
     if ende <= start:
-        return None
+        return {"grund": "zu_kurzer_zeitraum"}
     treffer = []
     for i in range(start, ende):
         _, kategorie, _, _, _ = score_bei_index(serien, closes, highs, lows, i)
@@ -376,9 +371,10 @@ def backtest_kategorie(closes, highs, lows, ziel_kategorie, vorschau=5):
             veraenderung = (closes[i + vorschau] - closes[i]) / closes[i] * 100
             treffer.append(veraenderung)
     if len(treffer) < 5:
-        return None
+        return {"grund": "zu_wenig_faelle", "anzahl": len(treffer)}
     serie = pd.Series(treffer)
     return {
+        "grund": "ok",
         "anzahl": len(treffer),
         "prozent_positiv": float((serie > 0).mean() * 100),
         "durchschnitt": float(serie.mean()),
@@ -631,8 +627,17 @@ with tab_beobachtung:
                         tuple(daten["closes"]), tuple(daten["highs"]), tuple(daten["lows"]),
                         daten["kategorie"], vorschau=5,
                     )
-                if ergebnis is None:
-                    st.info("Nicht genug historische Fälle mit genau dieser Signal-Kategorie für eine verlässliche Aussage.")
+                if ergebnis["grund"] == "zu_kurzer_zeitraum":
+                    st.info(
+                        "Der gewählte Zeitraum lädt zu wenige Kerzen für einen Backtest "
+                        "(braucht mindestens ca. 55). Wähle oben \"1 Monat\" oder \"3 Monate\", "
+                        "um historische Statistik zu sehen."
+                    )
+                elif ergebnis["grund"] == "zu_wenig_faelle":
+                    st.info(
+                        f"'{daten['kategorie']}' trat in der geladenen Historie nur "
+                        f"{ergebnis['anzahl']}× auf – zu wenig für eine verlässliche Aussage."
+                    )
                 else:
                     st.markdown(
                         f"In der geladenen Historie trat **'{daten['kategorie']}'** bisher "
