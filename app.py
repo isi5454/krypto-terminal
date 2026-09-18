@@ -1137,6 +1137,19 @@ with tab_sitzungen:
                     f"{baerischste[1]['durchschnitt']:+.2f}%",
                 )
                 st.caption(f"Basis: letzte 90 Tage, {coin_auswahl}. Werte je Stunde beruhen auf mindestens 5 historischen Vorkommen.")
+
+                if coin_auswahl == "PAXG":
+                    london_start = SITZUNGEN["🇬🇧 Europa (London)"]["start_utc"]
+                    if london_start in ergebnis:
+                        lw = ergebnis[london_start]
+                        st.info(
+                            f"💡 **Besonderheit bei Gold:** London ist historisch das wichtigste Zentrum "
+                            f"für den physischen Goldhandel (dort wird zweimal täglich der offizielle "
+                            f"Referenzpreis festgelegt). Zur Londoner Eröffnung "
+                            f"({utc_stunde_zu_lokal(london_start)} Uhr deine Zeit) lag die historische "
+                            f"Ø-Veränderung bei **{lw['durchschnitt']:+.2f}%** ({lw['anzahl']}× beobachtet) – "
+                            f"reine Vergangenheitsstatistik, keine Vorhersage."
+                        )
         else:
             st.warning("Coin konnte nicht aufgelöst werden.")
     else:
