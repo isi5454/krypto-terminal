@@ -566,7 +566,7 @@ def coin_daten_laden(ticker: str, intervall_label: str):
     }
 
 
-def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True):
+def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True, projektion=None, aktueller_preis=None, vorschau=5):
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["zeit"], open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="Kurs",
@@ -588,6 +588,32 @@ def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True):
                 annotation_text=f"Fib {name}", annotation_position="right",
                 annotation_font_size=10,
             )
+
+    # Projektions-Zone: KEINE Ziel-Linie (das wäre eine Vorhersage), sondern eine
+    # Bandbreite aus dem historischen Backtest - beste/schlechteste Entwicklung nach
+    # ähnlichen Signalen in der Vergangenheit dieses Coins.
+    if projektion and projektion.get("grund") == "ok" and aktueller_preis and len(df) >= 2:
+        letzter_zeitpunkt = df["zeit"].iloc[-1]
+        delta = df["zeit"].iloc[-1] - df["zeit"].iloc[-2]
+        projektions_zeitpunkt = letzter_zeitpunkt + delta * vorschau
+
+        oben = aktueller_preis * (1 + projektion["bester"] / 100)
+        unten = aktueller_preis * (1 + projektion["schlechtester"] / 100)
+        mitte = aktueller_preis * (1 + projektion["durchschnitt"] / 100)
+
+        fig.add_shape(
+            type="rect", x0=letzter_zeitpunkt, x1=projektions_zeitpunkt,
+            y0=min(oben, unten), y1=max(oben, unten),
+            fillcolor="rgba(167,139,250,0.15)", line_width=0, layer="below",
+        )
+        fig.add_shape(
+            type="line", x0=letzter_zeitpunkt, x1=projektions_zeitpunkt, y0=mitte, y1=mitte,
+            line=dict(color="rgba(167,139,250,0.9)", dash="dot", width=1.5),
+        )
+        fig.add_annotation(
+            x=projektions_zeitpunkt, y=mitte, text=f"Ø {projektion['durchschnitt']:+.1f}%",
+            showarrow=False, font=dict(size=10, color="rgba(216,180,254,1)"), xanchor="left",
+        )
 
     fig.update_layout(
         height=420, margin=dict(l=10, r=10, t=10, b=10),
@@ -690,10 +716,25 @@ with tab_beobachtung:
                 "Zeitraum:", options=optionen, index=optionen.index(aktueller_zeitraum), key=f"select_{ticker}"
             )
             fib_anzeigen = st.checkbox("📐 Fibonacci-Level anzeigen", value=True, key=f"fib_toggle_{ticker}")
+
+            with st.spinner("Werte Historie aus…"):
+                backtest_ergebnis = backtest_kategorie(
+                    tuple(daten["closes"]), tuple(daten["highs"]), tuple(daten["lows"]),
+                    daten["kategorie"], vorschau=5,
+                )
+
             st.plotly_chart(
-                candlestick_chart(daten["df"], fib_level=daten["fib_level"], fib_anzeigen=fib_anzeigen),
+                candlestick_chart(
+                    daten["df"], fib_level=daten["fib_level"], fib_anzeigen=fib_anzeigen,
+                    projektion=backtest_ergebnis, aktueller_preis=daten["preis"], vorschau=5,
+                ),
                 use_container_width=True,
             )
+            if backtest_ergebnis.get("grund") == "ok":
+                st.caption(
+                    "🟣 Violette Zone im Chart: Spanne aus bester/schlechtester historischer Entwicklung "
+                    "nach diesem Signal – keine Ziel-Vorhersage, sondern eine Bandbreite aus der Vergangenheit."
+                )
 
             c1, c2, c3, c4 = st.columns(4)
 
@@ -745,11 +786,7 @@ with tab_beobachtung:
                     st.write("Nicht verfügbar.")
 
             with st.expander("📊 Historische Trefferquote für dieses Signal (Backtest)"):
-                with st.spinner("Werte Historie aus…"):
-                    ergebnis = backtest_kategorie(
-                        tuple(daten["closes"]), tuple(daten["highs"]), tuple(daten["lows"]),
-                        daten["kategorie"], vorschau=5,
-                    )
+                ergebnis = backtest_ergebnis
                 if ergebnis["grund"] == "zu_kurzer_zeitraum":
                     st.info(
                         "Der gewählte Zeitraum lädt zu wenige Kerzen für einen Backtest "
