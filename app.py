@@ -14,7 +14,7 @@ st.set_page_config(page_title="Krypto Monitoring Terminal", page_icon="⚡", lay
 BIN_ID = st.secrets["JSONBIN_BIN_ID"]
 API_KEY = st.secrets["JSONBIN_API_KEY"]
 
-# --- 🌐 DATENQUELLE: CoinGecko ---
+# --- 🌐 DATENQUELLE: CoinGecko (Portfolio, Handelssitzungen, Top Bewegungen) ---
 # Wichtig: NICHT Binance, weil Binance Anfragen von Cloud-Servern (AWS/GCP) blockiert -
 # dasträfe sowohl Streamlit Cloud als auch GitHub Actions. CoinGecko blockiert das nicht.
 COINGECKO_BASIS = "https://api.coingecko.com/api/v3"
@@ -26,11 +26,18 @@ TICKER_ZU_ID = {
     "PAXG": "pax-gold",
 }
 
-TIMEFRAME_ZU_TAGE = {
-    "⏱️ 1 Tag": 1,
-    "🕐 1 Woche": 7,
-    "🛑 1 Monat": 30,
-    "📅 3 Monate": 90,
+# --- 🌐 DATENQUELLE: CryptoCompare (Beobachtung-Tab - Kerzen/Chart/Signale) ---
+# Liefert echte Minuten-/Stunden-Kerzen (Binance kann das aus der Cloud nicht, s.o.;
+# CoinGecko nur tageweise Granularität). CryptoCompare blockiert Cloud-Server nicht.
+CRYPTOCOMPARE_BASIS = "https://min-api.cryptocompare.com/data/v2"
+CRYPTOCOMPARE_API_KEY = st.secrets.get("CRYPTOCOMPARE_API_KEY", "")
+
+TIMEFRAME_OPTIONEN = {
+    "⏱️ 5 Min": ("histominute", 5),
+    "⏱️ 15 Min": ("histominute", 15),
+    "🕐 1 Stunde": ("histohour", 1),
+    "🛑 4 Stunden": ("histohour", 4),
+    "📅 1 Tag": ("histoday", 1),
 }
 
 ALARM_TYP_ANZEIGE = {
@@ -225,35 +232,43 @@ def coingecko_id_ermitteln(ticker: str):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def coingecko_ohlc_holen(coingecko_id: str, tage: int):
+def cryptocompare_ohlc_holen(ticker: str, endpoint: str, aggregate: int, limit: int = 300):
+    """Echte OHLC-Kerzen (inkl. Volumen) von CryptoCompare - liefert Minuten-,
+    Stunden- oder Tages-Granularität je nach endpoint/aggregate."""
+    if not CRYPTOCOMPARE_API_KEY:
+        return None
     try:
         r = requests.get(
-            f"{COINGECKO_BASIS}/coins/{coingecko_id}/ohlc",
-            params={"vs_currency": "usd", "days": tage}, timeout=15,
+            f"{CRYPTOCOMPARE_BASIS}/{endpoint}",
+            params={
+                "fsym": ticker, "tsym": "USD", "aggregate": aggregate,
+                "limit": limit, "api_key": CRYPTOCOMPARE_API_KEY,
+            },
+            timeout=15,
         )
         r.raise_for_status()
-        rohdaten = r.json()
+        antwort = r.json()
+        if antwort.get("Response") != "Success":
+            return None
+        rohdaten = antwort.get("Data", {}).get("Data", [])
     except requests.RequestException:
         return None
     if not rohdaten:
         return None
-    df = pd.DataFrame(rohdaten, columns=["zeit_ms", "open", "high", "low", "close"])
-    df["zeit"] = pd.to_datetime(df["zeit_ms"], unit="ms")
-    return df
+    df = pd.DataFrame(rohdaten)
+    if "close" not in df.columns:
+        return None
+    df = df[df["close"] > 0].reset_index(drop=True)  # CryptoCompare füllt fehlende Perioden manchmal mit Nullzeilen
+    if df.empty or len(df) < 20:
+        return None
+    df["zeit"] = pd.to_datetime(df["time"], unit="s")
+    df = df.rename(columns={"volumeto": "volumen"})
+    return df[["zeit", "open", "high", "low", "close", "volumen"]]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def coingecko_volumen_holen(coingecko_id: str, tage: int):
-    try:
-        r = requests.get(
-            f"{COINGECKO_BASIS}/coins/{coingecko_id}/market_chart",
-            params={"vs_currency": "usd", "days": tage}, timeout=15,
-        )
-        r.raise_for_status()
-        punkte = r.json().get("total_volumes", [])
-        return [p[1] for p in punkte]
-    except requests.RequestException:
-        return []
+def cryptocompare_symbol_gueltig(ticker: str) -> bool:
+    df = cryptocompare_ohlc_holen(ticker, "histoday", 1, limit=10)
+    return df is not None and not df.empty
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -591,27 +606,23 @@ def hypo_trades_aktualisieren(ticker, daten):
 
 
 def coin_daten_laden(ticker: str, intervall_label: str):
-    coingecko_id = coingecko_id_ermitteln(ticker)
-    if not coingecko_id:
-        return None
-    tage = TIMEFRAME_ZU_TAGE.get(intervall_label, 7)
-    df = coingecko_ohlc_holen(coingecko_id, tage)
+    endpoint, aggregate = TIMEFRAME_OPTIONEN.get(intervall_label, ("histohour", 1))
+    df = cryptocompare_ohlc_holen(ticker, endpoint, aggregate)
     if df is None or df.empty or len(df) < 20:
         return None
 
     closes_chart = df["close"].tolist()
     highs_chart = df["high"].tolist()
     lows_chart = df["low"].tolist()
+    volumen_liste = df["volumen"].tolist()
 
     bb_mittel_serie, bb_oben_serie, bb_unten_serie = bollinger_baender_serie(closes_chart)
     df["bb_mittel"] = bb_mittel_serie.values
     df["bb_oben"] = bb_oben_serie.values
     df["bb_unten"] = bb_unten_serie.values
 
-    volumen_liste = coingecko_volumen_holen(coingecko_id, tage)
-
-    # Signale NUR aus abgeschlossenen Kerzen berechnen - die letzte Kerze läuft bei
-    # CoinGecko evtl. noch, sonst würde sich der Score bei jedem Neuladen "verflackern"
+    # Signale NUR aus abgeschlossenen Kerzen berechnen - die letzte Kerze läuft evtl.
+    # noch, sonst würde sich der Score bei jedem Neuladen "verflackern"
     # (Praxis übernommen aus dem Vergleichs-Tool des Kollegen).
     n_signal = len(closes_chart) - 1 if len(closes_chart) > 21 else len(closes_chart)
     closes = closes_chart[:n_signal]
@@ -642,7 +653,6 @@ def coin_daten_laden(ticker: str, intervall_label: str):
         "volumen_schnitt": pd.Series(volumen_liste).rolling(min(20, max(len(volumen_liste) - 1, 1))).mean().iloc[-1] if volumen_liste else None,
         "closes": closes, "highs": highs, "lows": lows,
         "fib_level": fib_level, "fib_naechstes": fib_naechstes,
-        "coingecko_id": coingecko_id,
     }
 
 
@@ -703,12 +713,14 @@ def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True, proje
 
 
 # --- 🖥️ OBERFLÄCHE ---
-st.title("⚡ Krypto Monitoring Terminal (Live-Daten, CoinGecko)")
+st.title("⚡ Krypto Monitoring Terminal (Live-Daten)")
 st.caption(
-    "Kurse & Kerzen: CoinGecko · Angst-&-Gier-Index: alternative.me · "
+    "Kerzen & Signale: CryptoCompare · Angst-&-Gier-Index: alternative.me · "
+    "Sitzungen/Portfolio/Top-Bewegungen: CoinGecko · "
     "Nur Beobachtung – **keine automatische Order-Ausführung, keine Anlageberatung.** "
     "Signale sind statistische Tendenzen aus der Vergangenheit, keine Garantie."
 )
+st.caption("Powered by CryptoCompare")
 
 tab_beobachtung, tab_portfolio, tab_alarme, tab_sitzungen, tab_bewegungen = st.tabs(
     ["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme", "🌍 Handelssitzungen", "🔥 Top Bewegungen"]
@@ -726,14 +738,14 @@ with tab_beobachtung:
         watchlist = st.session_state.zustand["watchlist"]
         if neuer_ticker in watchlist:
             st.warning(f"{neuer_ticker} wird bereits beobachtet.")
-        elif coingecko_id_ermitteln(neuer_ticker):
+        elif cryptocompare_symbol_gueltig(neuer_ticker):
             watchlist.append(neuer_ticker)
             zustand_speichern()
             st.success(f"{neuer_ticker} hinzugefügt.")
             time.sleep(0.3)
             st.rerun()
         else:
-            st.error(f'Kein Coin mit Kürzel "{neuer_ticker}" auf CoinGecko gefunden.')
+            st.error(f'Kein Coin mit Kürzel "{neuer_ticker}" bei CryptoCompare gefunden.')
 
     st.markdown("---")
     st.subheader("🧠 Krypto-Angst-&-Gier-Index")
@@ -746,8 +758,7 @@ with tab_beobachtung:
 
     st.markdown("---")
     if st.button("🔄 Daten neu laden", type="primary", use_container_width=True, key="scan_btn"):
-        coingecko_ohlc_holen.clear()
-        coingecko_volumen_holen.clear()
+        cryptocompare_ohlc_holen.clear()
         aktuellen_preis_holen.clear()
         fear_greed_index_holen.clear()
         backtest_kategorie.clear()
@@ -758,7 +769,7 @@ with tab_beobachtung:
     st.subheader("📊 Live-Kerzen, Signal-Score & Indikatoren")
 
     watchlist = st.session_state.zustand["watchlist"]
-    optionen = list(TIMEFRAME_ZU_TAGE.keys())
+    optionen = list(TIMEFRAME_OPTIONEN.keys())
 
     for ticker in list(watchlist):
         aktueller_zeitraum = st.session_state.get(f"select_{ticker}", optionen[1])
