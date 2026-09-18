@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
 import plotly.graph_objects as go
 import time
 import uuid
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 st.set_page_config(page_title="Krypto Monitoring Terminal", page_icon="⚡", layout="wide")
 
@@ -35,6 +38,75 @@ ALARM_TYP_ANZEIGE = {
     "rsi_ueber": "RSI über",
     "rsi_unter": "RSI unter",
 }
+
+# --- 🌍 HANDELSSITZUNGEN ---
+# Gängige, häufig verwendete Richtwerte - keine offiziell regulierten Öffnungszeiten
+# (Krypto und Gold-Token wie PAXG handeln durchgehend). Wichtig für Volatilität,
+# NICHT für die Richtung (hoch/runter) - siehe Hinweis im entsprechenden Reiter.
+SITZUNGEN = {
+    "🌏 Asien (Tokio)": {"start_utc": 0, "ende_utc": 9},
+    "🇬🇧 Europa (London)": {"start_utc": 8, "ende_utc": 17},
+    "🇺🇸 Amerika (New York)": {"start_utc": 13, "ende_utc": 22},
+}
+LOKALE_ZEITZONE = "Europe/Vienna"
+
+
+def sitzungs_status():
+    jetzt_utc = datetime.now(timezone.utc)
+    stunde_utc = jetzt_utc.hour
+    ergebnisse = []
+    for name, zeiten in SITZUNGEN.items():
+        start, ende = zeiten["start_utc"], zeiten["ende_utc"]
+        offen = start <= stunde_utc < ende
+        ergebnisse.append({"name": name, "start_utc": start, "ende_utc": ende, "offen": offen})
+    return ergebnisse, jetzt_utc
+
+
+def utc_stunde_zu_lokal(utc_stunde, ziel_zone=LOKALE_ZEITZONE):
+    heute = datetime.now(timezone.utc).date()
+    utc_zeit = datetime(heute.year, heute.month, heute.day, utc_stunde % 24, 0, tzinfo=timezone.utc)
+    lokale_zeit = utc_zeit.astimezone(ZoneInfo(ziel_zone))
+    return lokale_zeit.strftime("%H:%M")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def coingecko_preise_mit_zeit_holen(coingecko_id: str, tage: int = 90):
+    """Stündliche (bei days 2-90) Schlusskurse mit Zeitstempel - für die
+    Sitzungs-Statistik. Nur Nahepreis, keine echten OHLC-Kerzen nötig."""
+    try:
+        r = requests.get(
+            f"{COINGECKO_BASIS}/coins/{coingecko_id}/market_chart",
+            params={"vs_currency": "usd", "days": tage}, timeout=15,
+        )
+        r.raise_for_status()
+        return r.json().get("prices", [])
+    except requests.RequestException:
+        return []
+
+
+def sitzungs_backtest(punkte, start_utc_stunde, vorschau_stunden=2):
+    """Reine Vergangenheitsstatistik: Wie hat sich der Kurs in der Historie
+    tatsächlich entwickelt, X Stunden nach Beginn dieser Sitzung? Keine
+    Vorhersage für die Zukunft, nur eine Beschreibung dessen, was bisher war."""
+    if len(punkte) < 20:
+        return None
+    zeiten = [datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc) for p in punkte]
+    preise = [p[1] for p in punkte]
+    treffer = []
+    for i in range(len(punkte) - vorschau_stunden):
+        if zeiten[i].hour == start_utc_stunde:
+            veraenderung = (preise[i + vorschau_stunden] - preise[i]) / preise[i] * 100
+            treffer.append(veraenderung)
+    if len(treffer) < 5:
+        return None
+    serie = pd.Series(treffer)
+    return {
+        "anzahl": len(treffer),
+        "prozent_positiv": float((serie > 0).mean() * 100),
+        "durchschnitt": float(serie.mean()),
+        "schlechtester": float(serie.min()),
+        "bester": float(serie.max()),
+    }
 
 
 # --- 💾 PERSISTENTER SPEICHER (JSONBin – überlebt Neustarts & Neuladen) ---
@@ -143,50 +215,194 @@ def fear_greed_index_holen():
         return None, None
 
 
-# --- 📐 INDIKATOREN ---
+# --- 📐 INDIKATOREN ALS VOLLSTÄNDIGE ZEITREIHEN (für aktuelle Anzeige UND Backtest) ---
 
-def sma(werte, periode):
-    s = pd.Series(werte)
-    if len(s) < periode:
-        return None
-    return float(s.rolling(periode).mean().iloc[-1])
+def indikator_serien_berechnen(closes, highs, lows):
+    s = pd.Series(closes)
+    h = pd.Series(highs)
+    l = pd.Series(lows)
 
-
-def rsi(werte, periode=14):
-    s = pd.Series(werte)
-    if len(s) <= periode:
-        return None
     delta = s.diff()
-    gewinn = delta.clip(lower=0).rolling(periode).mean()
-    verlust = (-delta.clip(upper=0)).rolling(periode).mean()
+    gewinn = delta.clip(lower=0).rolling(14).mean()
+    verlust = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gewinn / verlust.replace(0, 1e-9)
-    return float(100 - (100 / (1 + rs)).iloc[-1])
+    rsi_serie = 100 - (100 / (1 + rs))
+
+    ema12 = s.ewm(span=12, adjust=False).mean()
+    ema26 = s.ewm(span=26, adjust=False).mean()
+    macd_serie = ema12 - ema26
+    signal_serie = macd_serie.ewm(span=9, adjust=False).mean()
+
+    bb_mittel = s.rolling(20).mean()
+    bb_std = s.rolling(20).std()
+    bb_oben = bb_mittel + 2 * bb_std
+    bb_unten = bb_mittel - 2 * bb_std
+
+    tief_14 = l.rolling(14).min()
+    hoch_14 = h.rolling(14).max()
+    stoch_k = 100 * (s - tief_14) / (hoch_14 - tief_14).replace(0, 1e-9)
+    stoch_d = stoch_k.rolling(3).mean()
+
+    sma_trend = s.rolling(50).mean()
+
+    prev_close = s.shift(1)
+    prev_high = h.shift(1)
+    prev_low = l.shift(1)
+    tr = pd.concat([h - l, (h - prev_close).abs(), (l - prev_close).abs()], axis=1).max(axis=1)
+    plus_dm_raw = h - prev_high
+    minus_dm_raw = prev_low - l
+    plus_dm = pd.Series(np.where((plus_dm_raw > minus_dm_raw) & (plus_dm_raw > 0), plus_dm_raw, 0), index=s.index)
+    minus_dm = pd.Series(np.where((minus_dm_raw > plus_dm_raw) & (minus_dm_raw > 0), minus_dm_raw, 0), index=s.index)
+    tr_glatt = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    plus_dm_glatt = plus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+    minus_dm_glatt = minus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+    plus_di = 100 * plus_dm_glatt / tr_glatt.replace(0, 1e-9)
+    minus_di = 100 * minus_dm_glatt / tr_glatt.replace(0, 1e-9)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
+    adx_serie = dx.ewm(alpha=1 / 14, adjust=False).mean()
+
+    return {
+        "rsi": rsi_serie, "macd": macd_serie, "signal": signal_serie,
+        "bb_mittel": bb_mittel, "bb_oben": bb_oben, "bb_unten": bb_unten,
+        "stoch_k": stoch_k, "stoch_d": stoch_d, "sma_trend": sma_trend, "adx": adx_serie,
+    }
 
 
-def macd(werte, fast=12, slow=26, signal=9):
-    s = pd.Series(werte)
-    if len(s) < slow + signal:
-        return None, None
-    ema_fast = s.ewm(span=fast, adjust=False).mean()
-    ema_slow = s.ewm(span=slow, adjust=False).mean()
-    macd_linie = ema_fast - ema_slow
-    signal_linie = macd_linie.ewm(span=signal, adjust=False).mean()
-    return float(macd_linie.iloc[-1]), float(signal_linie.iloc[-1])
+def score_bei_index(serien, closes, i):
+    """Kombiniert 5 Indikatoren zu einem Score (-5 bis +5) und liefert die Gründe
+    in Klartext. Rein beschreibend, was die Indikatoren JETZT zeigen -
+    keine Vorhersage und keine Handlungsempfehlung."""
+    preis = closes[i]
+def score_bei_index(serien, closes, highs, lows, i, fib_fenster=100):
+    """Kombiniert 6 Indikatoren zu einem Score (-6 bis +6) und liefert die Gründe
+    in Klartext. Rein beschreibend, was die Indikatoren JETZT zeigen -
+    keine Vorhersage und keine Handlungsempfehlung.
+    Fibonacci nutzt bewusst nur ein RÜCKBLICKENDES Fenster (kein Blick in die
+    Zukunft) - sonst wäre der Backtest weiter unten geschönt."""
+    preis = closes[i]
+    rsi_wert = serien["rsi"].iloc[i]
+    macd_wert = serien["macd"].iloc[i]
+    signal_wert = serien["signal"].iloc[i]
+    bb_oben = serien["bb_oben"].iloc[i]
+    bb_unten = serien["bb_unten"].iloc[i]
+    stoch_k = serien["stoch_k"].iloc[i]
+    trend = serien["sma_trend"].iloc[i]
+    adx_wert = serien["adx"].iloc[i]
+
+    score = 0
+    gruende = []
+    if pd.notna(rsi_wert):
+        if rsi_wert < 32:
+            score += 1; gruende.append(f"RSI überverkauft ({rsi_wert:.0f})")
+        elif rsi_wert > 70:
+            score -= 1; gruende.append(f"RSI überkauft ({rsi_wert:.0f})")
+    if pd.notna(macd_wert) and pd.notna(signal_wert):
+        if macd_wert > signal_wert:
+            score += 1; gruende.append("MACD über Signallinie")
+        else:
+            score -= 1; gruende.append("MACD unter Signallinie")
+    if pd.notna(bb_oben) and pd.notna(bb_unten):
+        if preis < bb_unten:
+            score += 1; gruende.append("Preis unter unterem Bollinger-Band")
+        elif preis > bb_oben:
+            score -= 1; gruende.append("Preis über oberem Bollinger-Band")
+    if pd.notna(stoch_k):
+        if stoch_k < 20:
+            score += 1; gruende.append(f"Stochastik überverkauft ({stoch_k:.0f})")
+        elif stoch_k > 80:
+            score -= 1; gruende.append(f"Stochastik überkauft ({stoch_k:.0f})")
+    if pd.notna(trend):
+        if preis > trend:
+            score += 1; gruende.append("Preis über Trend-SMA(50)")
+        else:
+            score -= 1; gruende.append("Preis unter Trend-SMA(50)")
+
+    # 6. Faktor: Fibonacci - nur rückblickendes Fenster, kein Blick in die Zukunft
+    fenster_start = max(0, i - fib_fenster + 1)
+    fib_level_lokal = fibonacci_level_berechnen(highs[fenster_start:i + 1], lows[fenster_start:i + 1])
+    if fib_level_lokal and i >= fenster_start + 10:
+        tiefstes_kuerzlich = min(lows[max(fenster_start, i - 2):i + 1])
+        hoechstes_kuerzlich = max(highs[max(fenster_start, i - 2):i + 1])
+        for name, wert in fib_level_lokal.items():
+            if wert <= 0:
+                continue
+            if abs(tiefstes_kuerzlich - wert) / wert * 100 < 1.0 and preis > wert:
+                score += 1; gruende.append(f"Preis hat Fib-Level {name} als Unterstützung bestätigt")
+                break
+            if abs(hoechstes_kuerzlich - wert) / wert * 100 < 1.0 and preis < wert:
+                score -= 1; gruende.append(f"Preis an Fib-Level {name} abgewiesen")
+                break
+
+    if score >= 4:
+        kategorie = "Stark bullisch"
+    elif score >= 1:
+        kategorie = "Leicht bullisch"
+    elif score <= -4:
+        kategorie = "Stark bärisch"
+    elif score <= -1:
+        kategorie = "Leicht bärisch"
+    else:
+        kategorie = "Neutral"
+
+    trend_stark = bool(pd.notna(adx_wert) and adx_wert > 25)
+    return score, kategorie, gruende, trend_stark, (float(adx_wert) if pd.notna(adx_wert) else None)
 
 
-def atr_prozent(highs, lows, closes, periode=14):
-    if len(closes) < periode + 1:
-        return 0.0
-    df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
-    prev_close = df["close"].shift(1)
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev_close).abs(),
-        (df["low"] - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    atr = tr.rolling(periode).mean().iloc[-1]
-    letzter = closes[-1]
-    return float(atr / letzter * 100) if letzter else 0.0
+@st.cache_data(ttl=600, show_spinner=False)
+def backtest_kategorie(closes, highs, lows, ziel_kategorie, vorschau=5):
+    """Sucht in der Historie nach Momenten mit der GLEICHEN Signal-Kategorie und
+    zeigt, wie sich der Kurs danach tatsächlich entwickelt hat. Echte historische
+    Zahlen statt eines Versprechens - Vergangenheit ist keine Garantie für die Zukunft."""
+    serien = indikator_serien_berechnen(closes, highs, lows)
+    n = len(closes)
+    start = 50
+    ende = n - vorschau
+    if ende <= start:
+        return None
+    treffer = []
+    for i in range(start, ende):
+        _, kategorie, _, _, _ = score_bei_index(serien, closes, highs, lows, i)
+        if kategorie == ziel_kategorie:
+            veraenderung = (closes[i + vorschau] - closes[i]) / closes[i] * 100
+            treffer.append(veraenderung)
+    if len(treffer) < 5:
+        return None
+    serie = pd.Series(treffer)
+    return {
+        "anzahl": len(treffer),
+        "prozent_positiv": float((serie > 0).mean() * 100),
+        "durchschnitt": float(serie.mean()),
+        "schlechtester": float(serie.min()),
+        "bester": float(serie.max()),
+    }
+
+
+def fibonacci_level_berechnen(highs, lows):
+    """Fibonacci-Retracement-Level zwischen höchstem Hoch und tiefstem Tief der
+    geladenen Historie. Reine Referenz-Zonen für möglichen Support/Widerstand,
+    kein Kauf-/Verkaufssignal - der Markt muss ein Level nicht respektieren."""
+    hoch = max(highs)
+    tief = min(lows)
+    spanne = hoch - tief
+    if spanne <= 0:
+        return None
+    return {
+        "0.0%": hoch,
+        "23.6%": hoch - spanne * 0.236,
+        "38.2%": hoch - spanne * 0.382,
+        "50.0%": hoch - spanne * 0.5,
+        "61.8%": hoch - spanne * 0.618,
+        "78.6%": hoch - spanne * 0.786,
+        "100.0%": tief,
+    }
+
+
+def naechstes_fib_level(preis, level_dict):
+    if not level_dict:
+        return None
+    name, wert = min(level_dict.items(), key=lambda kv: abs(kv[1] - preis))
+    abstand_prozent = abs(preis - wert) / preis * 100
+    return name, wert, abstand_prozent
 
 
 def bollinger_baender_serie(werte, periode=20, anzahl_std=2):
@@ -196,36 +412,13 @@ def bollinger_baender_serie(werte, periode=20, anzahl_std=2):
     return mittel, mittel + anzahl_std * std, mittel - anzahl_std * std
 
 
-def konstellation_klassifizieren(closes):
-    if len(closes) < 30:
-        return "Neutral (zu wenig Historie)"
-    letzter = closes[-1]
-    rsi_wert = rsi(closes)
-    macd_linie, signal_linie = macd(closes)
-    trend = sma(closes, min(50, len(closes) - 1))
-
-    bullisch = (rsi_wert is not None and rsi_wert < 32) or (
-        macd_linie is not None and signal_linie is not None and macd_linie > signal_linie
-    )
-    baerisch = (rsi_wert is not None and rsi_wert > 70) or (
-        macd_linie is not None and signal_linie is not None and macd_linie < signal_linie
-    )
-    trend_auf = trend is not None and letzter > trend
-
-    if bullisch and not baerisch:
-        return "Bullisch" + (" + Preis über Trend-SMA" if trend_auf else " (aber Preis unter Trend-SMA)")
-    if baerisch and not bullisch:
-        return "Bärisch" + (" (Preis unter Trend-SMA)" if not trend_auf else " (trotz Preis über Trend-SMA)")
-    return "Gemischt / kein klares Signal"
-
-
 def coin_daten_laden(ticker: str, intervall_label: str):
     coingecko_id = coingecko_id_ermitteln(ticker)
     if not coingecko_id:
         return None
     tage = TIMEFRAME_ZU_TAGE.get(intervall_label, 7)
     df = coingecko_ohlc_holen(coingecko_id, tage)
-    if df is None or df.empty or len(df) < 5:
+    if df is None or df.empty or len(df) < 55:
         return None
 
     closes = df["close"].tolist()
@@ -239,22 +432,34 @@ def coin_daten_laden(ticker: str, intervall_label: str):
 
     volumen_liste = coingecko_volumen_holen(coingecko_id, tage)
 
+    serien = indikator_serien_berechnen(closes, highs, lows)
+    letzter_index = len(closes) - 1
+    score, kategorie, gruende, trend_stark, adx_wert = score_bei_index(serien, closes, highs, lows, letzter_index)
+
+    fib_level = fibonacci_level_berechnen(highs, lows)
+    fib_naechstes = naechstes_fib_level(closes[-1], fib_level) if fib_level else None
+
     return {
         "df": df,
         "preis": closes[-1],
-        "rsi": rsi(closes),
-        "trend_sma": sma(closes, min(50, len(closes) - 1)),
-        "atr_prozent": atr_prozent(highs, lows, closes),
-        "konstellation": konstellation_klassifizieren(closes),
+        "rsi": serien["rsi"].iloc[-1] if pd.notna(serien["rsi"].iloc[-1]) else None,
+        "stoch_k": serien["stoch_k"].iloc[-1] if pd.notna(serien["stoch_k"].iloc[-1]) else None,
+        "adx": adx_wert,
+        "trend_stark": trend_stark,
+        "score": score,
+        "kategorie": kategorie,
+        "gruende": gruende,
         "bb_oben": bb_oben_serie.iloc[-1] if len(bb_oben_serie) else None,
         "bb_unten": bb_unten_serie.iloc[-1] if len(bb_unten_serie) else None,
         "volumen_aktuell": volumen_liste[-1] if volumen_liste else None,
-        "volumen_schnitt": sma(volumen_liste, min(20, max(len(volumen_liste) - 1, 1))) if volumen_liste else None,
+        "volumen_schnitt": pd.Series(volumen_liste).rolling(min(20, max(len(volumen_liste) - 1, 1))).mean().iloc[-1] if volumen_liste else None,
+        "closes": closes, "highs": highs, "lows": lows,
+        "fib_level": fib_level, "fib_naechstes": fib_naechstes,
         "coingecko_id": coingecko_id,
     }
 
 
-def candlestick_chart(df: pd.DataFrame):
+def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True):
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["zeit"], open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="Kurs",
@@ -262,8 +467,23 @@ def candlestick_chart(df: pd.DataFrame):
     fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_oben"], line=dict(width=1, color="rgba(150,150,255,0.5)"), name="BB oben"))
     fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_unten"], line=dict(width=1, color="rgba(150,150,255,0.5)"), name="BB unten", fill="tonexty", fillcolor="rgba(150,150,255,0.07)"))
     fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_mittel"], line=dict(width=1, dash="dot", color="orange"), name="BB Mitte"))
+
+    if fib_anzeigen and fib_level:
+        fib_farben = {
+            "0.0%": "rgba(180,180,180,0.5)", "23.6%": "rgba(255,200,120,0.6)",
+            "38.2%": "rgba(255,160,90,0.6)", "50.0%": "rgba(255,120,120,0.7)",
+            "61.8%": "rgba(255,90,90,0.7)", "78.6%": "rgba(255,60,60,0.6)",
+            "100.0%": "rgba(180,180,180,0.5)",
+        }
+        for name, wert in fib_level.items():
+            fig.add_hline(
+                y=wert, line_dash="dot", line_width=1, line_color=fib_farben.get(name, "gray"),
+                annotation_text=f"Fib {name}", annotation_position="right",
+                annotation_font_size=10,
+            )
+
     fig.update_layout(
-        height=380, margin=dict(l=10, r=10, t=10, b=10),
+        height=420, margin=dict(l=10, r=10, t=10, b=10),
         xaxis_rangeslider_visible=False, template="plotly_dark", showlegend=False,
     )
     return fig
@@ -273,10 +493,13 @@ def candlestick_chart(df: pd.DataFrame):
 st.title("⚡ Krypto Monitoring Terminal (Live-Daten, CoinGecko)")
 st.caption(
     "Kurse & Kerzen: CoinGecko · Angst-&-Gier-Index: alternative.me · "
-    "Nur Beobachtung – **keine automatische Order-Ausführung, keine Anlageberatung.**"
+    "Nur Beobachtung – **keine automatische Order-Ausführung, keine Anlageberatung.** "
+    "Signale sind statistische Tendenzen aus der Vergangenheit, keine Garantie."
 )
 
-tab_beobachtung, tab_portfolio, tab_alarme = st.tabs(["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme"])
+tab_beobachtung, tab_portfolio, tab_alarme, tab_sitzungen = st.tabs(
+    ["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme", "🌍 Handelssitzungen"]
+)
 
 # ============================== TAB 1: BEOBACHTUNG ==============================
 with tab_beobachtung:
@@ -314,11 +537,12 @@ with tab_beobachtung:
         coingecko_volumen_holen.clear()
         aktuellen_preis_holen.clear()
         fear_greed_index_holen.clear()
+        backtest_kategorie.clear()
         st.session_state.zustand = zustand_laden()
         st.rerun()
 
     st.markdown("---")
-    st.subheader("📊 Live-Kerzen, Bollinger Bänder & Volumen")
+    st.subheader("📊 Live-Kerzen, Signal-Score & Indikatoren")
 
     watchlist = st.session_state.zustand["watchlist"]
     for ticker in list(watchlist):
@@ -330,52 +554,84 @@ with tab_beobachtung:
                 daten = coin_daten_laden(ticker, neues_intervall)
 
             if daten is None:
-                st.error("Keine Daten verfügbar (API nicht erreichbar, Rate-Limit oder unbekanntes Kürzel).")
+                st.error("Keine Daten verfügbar (API nicht erreichbar, Rate-Limit, unbekanntes Kürzel oder zu wenig Historie).")
                 continue
 
             st.markdown(f"Kurs: **$ {daten['preis']:,.4f}**")
-            st.plotly_chart(candlestick_chart(daten["df"]), use_container_width=True)
+            fib_anzeigen = st.checkbox("📐 Fibonacci-Level anzeigen", value=True, key=f"fib_toggle_{ticker}")
+            st.plotly_chart(
+                candlestick_chart(daten["df"], fib_level=daten["fib_level"], fib_anzeigen=fib_anzeigen),
+                use_container_width=True,
+            )
 
-            c_links, c_mitte, c_rechts = st.columns(3)
-            with c_links:
-                st.write("📐 Indikatoren:")
-                st.write(f"RSI (14): **{daten['rsi']:.1f}**" if daten["rsi"] is not None else "RSI: —")
-                st.write(f"Volatilität (ATR): **{daten['atr_prozent']:.2f}%**")
-                label = daten["konstellation"]
-                if label.startswith("Bullisch"):
-                    st.success(f"🟢 {label}")
-                elif label.startswith("Bärisch"):
-                    st.error(f"🔴 {label}")
+            c1, c2, c3, c4 = st.columns(4)
+
+            with c1:
+                st.write("🎯 Signal-Score:")
+                score = daten["score"]
+                kategorie = daten["kategorie"]
+                anzeige = f"{kategorie} ({score:+d}/6)"
+                if kategorie.startswith("Stark bullisch") or kategorie.startswith("Leicht bullisch"):
+                    st.success(f"🟢 {anzeige}")
+                elif kategorie.startswith("Stark bärisch") or kategorie.startswith("Leicht bärisch"):
+                    st.error(f"🔴 {anzeige}")
                 else:
-                    st.info(f"🟡 {label}")
+                    st.info(f"🟡 {anzeige}")
+                for grund in daten["gruende"]:
+                    st.caption(f"• {grund}")
 
-            with c_mitte:
+            with c2:
+                st.write("📐 Weitere Indikatoren:")
+                st.write(f"RSI (14): **{daten['rsi']:.1f}**" if daten["rsi"] is not None else "RSI: —")
+                st.write(f"Stochastik: **{daten['stoch_k']:.1f}**" if daten["stoch_k"] is not None else "Stochastik: —")
+                if daten["adx"] is not None:
+                    trend_text = "starker Trend" if daten["trend_stark"] else "seitwärts/schwach"
+                    st.write(f"ADX: **{daten['adx']:.1f}** ({trend_text})")
+                    if not daten["trend_stark"]:
+                        st.caption("⚠️ Schwacher Trend – Signale hier tendenziell weniger verlässlich")
+                else:
+                    st.write("ADX: —")
+
+            with c3:
                 st.write("📏 Bollinger Bänder:")
                 if daten["bb_oben"] is not None:
                     st.write(f"Oben: **$ {daten['bb_oben']:,.2f}**")
                     st.write(f"Unten: **$ {daten['bb_unten']:,.2f}**")
-                    if daten["preis"] > daten["bb_oben"]:
-                        st.warning("Preis über oberem Band")
-                    elif daten["preis"] < daten["bb_unten"]:
-                        st.warning("Preis unter unterem Band")
-                    else:
-                        st.write("Preis im normalen Band")
                 else:
                     st.write("Noch zu wenig Historie.")
+                if daten["fib_naechstes"]:
+                    fib_name, fib_wert, fib_abstand = daten["fib_naechstes"]
+                    st.write(f"Nächstes Fib-Level: **{fib_name}** (${fib_wert:,.2f})")
+                    st.caption(f"Abstand: {fib_abstand:.2f}% – reine Referenzzone, kein Signal")
 
-            with c_rechts:
+            with c4:
                 st.write("📦 Volumen (24h, ca.):")
                 if daten["volumen_aktuell"] is not None:
                     st.write(f"Aktuell: **$ {daten['volumen_aktuell']:,.0f}**")
                     if daten["volumen_schnitt"]:
                         verhaeltnis = daten["volumen_aktuell"] / daten["volumen_schnitt"]
                         st.write(f"Ø: **$ {daten['volumen_schnitt']:,.0f}**")
-                        if verhaeltnis > 1.5:
-                            st.warning(f"{verhaeltnis:.1f}× über Durchschnitt")
-                        else:
-                            st.write(f"{verhaeltnis:.1f}× Durchschnitt")
+                        st.write(f"{verhaeltnis:.1f}× Durchschnitt")
                 else:
                     st.write("Nicht verfügbar.")
+
+            with st.expander("📊 Historische Trefferquote für dieses Signal (Backtest)"):
+                with st.spinner("Werte Historie aus…"):
+                    ergebnis = backtest_kategorie(
+                        tuple(daten["closes"]), tuple(daten["highs"]), tuple(daten["lows"]),
+                        daten["kategorie"], vorschau=5,
+                    )
+                if ergebnis is None:
+                    st.info("Nicht genug historische Fälle mit genau dieser Signal-Kategorie für eine verlässliche Aussage.")
+                else:
+                    st.markdown(
+                        f"In der geladenen Historie trat **'{daten['kategorie']}'** bisher "
+                        f"**{ergebnis['anzahl']}×** auf. 5 Kerzen später:"
+                    )
+                    st.write(f"📈 Kurs höher: **{ergebnis['prozent_positiv']:.0f}%** der Fälle")
+                    st.write(f"Ø Veränderung: **{ergebnis['durchschnitt']:+.2f}%**")
+                    st.write(f"Beste / schlechteste Entwicklung: **{ergebnis['bester']:+.2f}%** / **{ergebnis['schlechtester']:+.2f}%**")
+                    st.caption("Reine Vergangenheitsstatistik dieses Coins – keine Vorhersage für das nächste Mal.")
 
     if st.button("🗑️ Watchlist zurücksetzen (Nur Core-Coins)", key="reset_btn"):
         st.session_state.zustand["watchlist"] = ["BTC", "ETH", "SOL"]
@@ -497,3 +753,58 @@ with tab_alarme:
         und neu anlegen.
         """
     )
+
+# ============================== TAB 4: HANDELSSITZUNGEN ==============================
+with tab_sitzungen:
+    st.subheader("🌍 Handelssitzungen – Live-Status")
+    st.caption(
+        "Sitzungszeiten beeinflussen zuverlässig die **Volatilität** (wie stark sich der Kurs bewegt) – "
+        "aber NICHT die Richtung (ob er steigt oder fällt). Das hier ist eine Info-Übersicht plus "
+        "historische Statistik, **keine Vorhersage und keine Handelsempfehlung.**"
+    )
+
+    sitzungen, jetzt_utc = sitzungs_status()
+    st.markdown(f"Aktuelle Uhrzeit (UTC): **{jetzt_utc.strftime('%H:%M')}** | Deine Zeit (Wien): **{jetzt_utc.astimezone(ZoneInfo(LOKALE_ZEITZONE)).strftime('%H:%M')}**")
+
+    for s in sitzungen:
+        start_lokal = utc_stunde_zu_lokal(s["start_utc"])
+        ende_lokal = utc_stunde_zu_lokal(s["ende_utc"])
+        status = "🟢 Geöffnet" if s["offen"] else "⚪ Geschlossen"
+        st.write(f"**{s['name']}**: {status} — öffnet {start_lokal} Uhr, schließt {ende_lokal} Uhr (deine Zeit)")
+
+    st.caption(
+        "Zeiten sind gängige, häufig verwendete Richtwerte für Handelssitzungen – keine offiziell "
+        "regulierten Öffnungszeiten. Krypto und Gold-Token wie PAXG handeln durchgehend (24/7)."
+    )
+
+    st.markdown("---")
+    st.subheader("📊 Historische Kursbewegung nach Sitzungsbeginn")
+    st.caption("Reine Vergangenheitsstatistik dieses Coins – keine Garantie, dass es wieder so kommt.")
+
+    watchlist_optionen = st.session_state.zustand.get("watchlist", ["BTC", "ETH", "SOL"])
+    if watchlist_optionen:
+        coin_auswahl = st.selectbox("Coin auswählen:", options=watchlist_optionen, key="sitzung_coin")
+        vorschau_stunden = st.slider(
+            "Kursentwicklung wie viele Stunden nach Sitzungsbeginn betrachten?",
+            min_value=1, max_value=6, value=2, key="sitzung_vorschau",
+        )
+
+        coingecko_id = coingecko_id_ermitteln(coin_auswahl)
+        if coingecko_id:
+            with st.spinner("Werte Historie aus…"):
+                punkte = coingecko_preise_mit_zeit_holen(coingecko_id, tage=90)
+
+            for s in sitzungen:
+                with st.expander(f"{s['name']} – Öffnung ({utc_stunde_zu_lokal(s['start_utc'])} Uhr deine Zeit)"):
+                    ergebnis = sitzungs_backtest(punkte, s["start_utc"], vorschau_stunden)
+                    if ergebnis is None:
+                        st.info("Nicht genug historische Daten für eine verlässliche Aussage.")
+                    else:
+                        st.write(f"Aufgetreten: **{ergebnis['anzahl']}×** in den letzten 90 Tagen")
+                        st.write(f"Kurs höher nach {vorschau_stunden}h: **{ergebnis['prozent_positiv']:.0f}%** der Fälle")
+                        st.write(f"Ø Veränderung: **{ergebnis['durchschnitt']:+.2f}%**")
+                        st.write(f"Beste / schlechteste Entwicklung: **{ergebnis['bester']:+.2f}%** / **{ergebnis['schlechtester']:+.2f}%**")
+        else:
+            st.warning("Coin konnte nicht aufgelöst werden.")
+    else:
+        st.info("Noch keine Coins auf der Watchlist (Reiter 📊 Beobachtung).")
