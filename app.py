@@ -23,6 +23,7 @@ JSONBIN_BASIS = "https://api.jsonbin.io/v3/b"
 TICKER_ZU_ID = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
     "XRP": "ripple", "ADA": "cardano", "LINK": "chainlink",
+    "PAXG": "pax-gold",
 }
 
 TIMEFRAME_ZU_TAGE = {
@@ -119,10 +120,19 @@ def zustand_laden():
         record.setdefault("watchlist", ["BTC", "ETH", "SOL"])
         record.setdefault("portfolio", [])
         record.setdefault("alerts", [])
+        if "PAXG" not in record["watchlist"]:
+            record["watchlist"].append("PAXG")
+            try:
+                requests.put(
+                    f"{JSONBIN_BASIS}/{BIN_ID}", json=record,
+                    headers={"X-Master-Key": API_KEY, "Content-Type": "application/json"}, timeout=10,
+                )
+            except requests.RequestException:
+                pass
         return record
     except requests.RequestException:
         st.warning("Persistenter Speicher aktuell nicht erreichbar – Änderungen werden evtl. nicht gespeichert.")
-        return {"watchlist": ["BTC", "ETH", "SOL"], "portfolio": [], "alerts": []}
+        return {"watchlist": ["BTC", "ETH", "SOL", "PAXG"], "portfolio": [], "alerts": []}
 
 
 def zustand_speichern():
@@ -634,7 +644,7 @@ with tab_beobachtung:
                     st.caption("Reine Vergangenheitsstatistik dieses Coins – keine Vorhersage für das nächste Mal.")
 
     if st.button("🗑️ Watchlist zurücksetzen (Nur Core-Coins)", key="reset_btn"):
-        st.session_state.zustand["watchlist"] = ["BTC", "ETH", "SOL"]
+        st.session_state.zustand["watchlist"] = ["BTC", "ETH", "SOL", "PAXG"]
         zustand_speichern()
         st.rerun()
 
