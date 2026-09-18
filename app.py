@@ -427,16 +427,24 @@ def coin_daten_laden(ticker: str, intervall_label: str):
     if df is None or df.empty or len(df) < 20:
         return None
 
-    closes = df["close"].tolist()
-    highs = df["high"].tolist()
-    lows = df["low"].tolist()
+    closes_chart = df["close"].tolist()
+    highs_chart = df["high"].tolist()
+    lows_chart = df["low"].tolist()
 
-    bb_mittel_serie, bb_oben_serie, bb_unten_serie = bollinger_baender_serie(closes)
+    bb_mittel_serie, bb_oben_serie, bb_unten_serie = bollinger_baender_serie(closes_chart)
     df["bb_mittel"] = bb_mittel_serie.values
     df["bb_oben"] = bb_oben_serie.values
     df["bb_unten"] = bb_unten_serie.values
 
     volumen_liste = coingecko_volumen_holen(coingecko_id, tage)
+
+    # Signale NUR aus abgeschlossenen Kerzen berechnen - die letzte Kerze läuft bei
+    # CoinGecko evtl. noch, sonst würde sich der Score bei jedem Neuladen "verflackern"
+    # (Praxis übernommen aus dem Vergleichs-Tool des Kollegen).
+    n_signal = len(closes_chart) - 1 if len(closes_chart) > 21 else len(closes_chart)
+    closes = closes_chart[:n_signal]
+    highs = highs_chart[:n_signal]
+    lows = lows_chart[:n_signal]
 
     serien = indikator_serien_berechnen(closes, highs, lows)
     letzter_index = len(closes) - 1
@@ -447,7 +455,8 @@ def coin_daten_laden(ticker: str, intervall_label: str):
 
     return {
         "df": df,
-        "preis": closes[-1],
+        "preis": closes_chart[-1],
+        "preis_signal": closes[-1],
         "rsi": serien["rsi"].iloc[-1] if pd.notna(serien["rsi"].iloc[-1]) else None,
         "stoch_k": serien["stoch_k"].iloc[-1] if pd.notna(serien["stoch_k"].iloc[-1]) else None,
         "adx": adx_wert,
@@ -551,19 +560,41 @@ with tab_beobachtung:
     st.subheader("📊 Live-Kerzen, Signal-Score & Indikatoren")
 
     watchlist = st.session_state.zustand["watchlist"]
+    optionen = list(TIMEFRAME_ZU_TAGE.keys())
+
     for ticker in list(watchlist):
-        with st.expander(f"**{ticker}**", expanded=True):
-            optionen = list(TIMEFRAME_ZU_TAGE.keys())
-            neues_intervall = st.selectbox("Zeitraum:", options=optionen, index=1, key=f"select_{ticker}")
+        aktueller_zeitraum = st.session_state.get(f"select_{ticker}", optionen[1])
+        with st.spinner(f"Lade {ticker}…"):
+            daten = coin_daten_laden(ticker, aktueller_zeitraum)
 
-            with st.spinner(f"Lade Live-Daten für {ticker}…"):
-                daten = coin_daten_laden(ticker, neues_intervall)
+        st.markdown("---")
+        if daten is None:
+            st.error(f"**{ticker}**: Keine Daten verfügbar (API nicht erreichbar, Rate-Limit, unbekanntes Kürzel oder zu wenig Historie).")
+            continue
 
-            if daten is None:
-                st.error("Keine Daten verfügbar (API nicht erreichbar, Rate-Limit, unbekanntes Kürzel oder zu wenig Historie).")
-                continue
+        kategorie = daten["kategorie"]
+        score = daten["score"]
+        if kategorie.startswith("Stark bullisch") or kategorie.startswith("Leicht bullisch"):
+            ampel, ampel_text = "🟢", "Bullische Signale"
+        elif kategorie.startswith("Stark bärisch") or kategorie.startswith("Leicht bärisch"):
+            ampel, ampel_text = "🔴", "Bärische Signale"
+        else:
+            ampel, ampel_text = "🟡", "Neutral"
 
-            st.markdown(f"Kurs: **$ {daten['preis']:,.4f}**")
+        c_ampel, c_info = st.columns([1, 5])
+        with c_ampel:
+            st.markdown(f"## {ampel}")
+        with c_info:
+            st.markdown(f"**{ticker}** — $ {daten['preis']:,.2f} — **{ampel_text}** ({score:+d}/6)")
+            if daten["gruende"]:
+                st.caption(" · ".join(daten["gruende"][:3]))
+            else:
+                st.caption("Keine ausschlaggebenden Indikator-Signale")
+
+        with st.expander(f"📈 Details zu {ticker} (Chart, alle Indikatoren, Backtest)", expanded=False):
+            neues_intervall = st.selectbox(
+                "Zeitraum:", options=optionen, index=optionen.index(aktueller_zeitraum), key=f"select_{ticker}"
+            )
             fib_anzeigen = st.checkbox("📐 Fibonacci-Level anzeigen", value=True, key=f"fib_toggle_{ticker}")
             st.plotly_chart(
                 candlestick_chart(daten["df"], fib_level=daten["fib_level"], fib_anzeigen=fib_anzeigen),
@@ -574,12 +605,10 @@ with tab_beobachtung:
 
             with c1:
                 st.write("🎯 Signal-Score:")
-                score = daten["score"]
-                kategorie = daten["kategorie"]
                 anzeige = f"{kategorie} ({score:+d}/6)"
-                if kategorie.startswith("Stark bullisch") or kategorie.startswith("Leicht bullisch"):
+                if ampel == "🟢":
                     st.success(f"🟢 {anzeige}")
-                elif kategorie.startswith("Stark bärisch") or kategorie.startswith("Leicht bärisch"):
+                elif ampel == "🔴":
                     st.error(f"🔴 {anzeige}")
                 else:
                     st.info(f"🟡 {anzeige}")
