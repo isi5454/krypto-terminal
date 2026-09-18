@@ -151,6 +151,14 @@ def stunden_analyse(punkte, vorschau_stunden=2):
     return {"grund": "ok", "stunden": stunden_werte}
 
 
+def london_zeit_zu_utc_stunde(stunde, minute=0):
+    """Wandelt eine Uhrzeit in Londoner Ortszeit (z.B. LBMA-Gold-Fixierung) in
+    die aktuelle UTC-Stunde um - berücksichtigt automatisch Sommer-/Winterzeit."""
+    heute = datetime.now(timezone.utc).date()
+    london_zeit = datetime(heute.year, heute.month, heute.day, stunde, minute, tzinfo=ZoneInfo("Europe/London"))
+    return london_zeit.astimezone(timezone.utc).hour
+
+
 def stunden_chart(ergebnis, ziel_zone=LOKALE_ZEITZONE):
     zeilen = []
     for utc_stunde, werte in ergebnis.items():
@@ -810,6 +818,7 @@ with tab_beobachtung:
                 "Zeitraum:", options=optionen, index=optionen.index(aktueller_zeitraum), key=f"select_{ticker}"
             )
             fib_anzeigen = st.checkbox("📐 Fibonacci-Level anzeigen", value=True, key=f"fib_toggle_{ticker}")
+            projektion_anzeigen = st.checkbox("🟣 Projektions-Zone anzeigen", value=False, key=f"projektion_toggle_{ticker}")
 
             with st.spinner("Werte Historie aus…"):
                 backtest_ergebnis = backtest_kategorie(
@@ -820,11 +829,12 @@ with tab_beobachtung:
             st.plotly_chart(
                 candlestick_chart(
                     daten["df"], fib_level=daten["fib_level"], fib_anzeigen=fib_anzeigen,
-                    projektion=backtest_ergebnis, aktueller_preis=daten["preis"], vorschau=5,
+                    projektion=backtest_ergebnis if projektion_anzeigen else None,
+                    aktueller_preis=daten["preis"], vorschau=5,
                 ),
                 use_container_width=True,
             )
-            if backtest_ergebnis.get("grund") == "ok":
+            if projektion_anzeigen and backtest_ergebnis.get("grund") == "ok":
                 st.caption(
                     "🟣 Violette Zone im Chart: Spanne aus bester/schlechtester historischer Entwicklung "
                     "nach diesem Signal – keine Ziel-Vorhersage, sondern eine Bandbreite aus der Vergangenheit."
@@ -1138,18 +1148,56 @@ with tab_sitzungen:
                 )
                 st.caption(f"Basis: letzte 90 Tage, {coin_auswahl}. Werte je Stunde beruhen auf mindestens 5 historischen Vorkommen.")
 
+                st.markdown("---")
+                st.markdown("**📌 Besondere Zeitfenster – Live-Status**")
+                st.caption(
+                    "Zeigt, ob du gerade in einem besonderen Zeitfenster bist, plus das aktuelle "
+                    "Live-Signal des Coins – keine historische Statistik, kein Blick in die Zukunft."
+                )
+
+                with st.spinner("Lade aktuelles Signal…"):
+                    live_daten = coin_daten_laden(coin_auswahl, "🕐 1 Stunde")
+
+                if live_daten:
+                    live_kat = live_daten["kategorie"]
+                    if live_kat.startswith("Stark bullisch") or live_kat.startswith("Leicht bullisch"):
+                        live_ampel, live_text = "🟢", "Bullisch (Long-Tendenz)"
+                    elif live_kat.startswith("Stark bärisch") or live_kat.startswith("Leicht bärisch"):
+                        live_ampel, live_text = "🔴", "Bärisch (Short-Tendenz)"
+                    else:
+                        live_ampel, live_text = "🟡", "Neutral"
+                    st.write(f"**Aktuelles Live-Signal ({coin_auswahl}):** {live_ampel} {live_text} ({live_daten['score']:+d}/6)")
+                else:
+                    st.warning(f"Aktuelles Live-Signal für {coin_auswahl} nicht verfügbar.")
+
+                jetzt_stunde = jetzt_utc.hour
+                ny_start = SITZUNGEN["🇺🇸 Amerika (New York)"]["start_utc"]
+                london_ende = SITZUNGEN["🇬🇧 Europa (London)"]["ende_utc"]
+
+                ny_aktiv = jetzt_stunde == ny_start
+                status_text = "🟢 JETZT AKTIV" if ny_aktiv else "⚪ nicht aktiv"
+                st.write(f"🇺🇸 **New-York-Eröffnung** ({utc_stunde_zu_lokal(ny_start)} Uhr deine Zeit): {status_text}")
+
+                ueberlappung_aktiv = ny_start <= jetzt_stunde < london_ende
+                status_text = "🟢 JETZT AKTIV" if ueberlappung_aktiv else "⚪ nicht aktiv"
+                st.write(
+                    f"🔀 **London-New-York-Überlappung** (ca. {utc_stunde_zu_lokal(ny_start)}–"
+                    f"{utc_stunde_zu_lokal(london_ende)} Uhr deine Zeit): {status_text}"
+                )
+
                 if coin_auswahl == "PAXG":
-                    london_start = SITZUNGEN["🇬🇧 Europa (London)"]["start_utc"]
-                    if london_start in ergebnis:
-                        lw = ergebnis[london_start]
-                        st.info(
-                            f"💡 **Besonderheit bei Gold:** London ist historisch das wichtigste Zentrum "
-                            f"für den physischen Goldhandel (dort wird zweimal täglich der offizielle "
-                            f"Referenzpreis festgelegt). Zur Londoner Eröffnung "
-                            f"({utc_stunde_zu_lokal(london_start)} Uhr deine Zeit) lag die historische "
-                            f"Ø-Veränderung bei **{lw['durchschnitt']:+.2f}%** ({lw['anzahl']}× beobachtet) – "
-                            f"reine Vergangenheitsstatistik, keine Vorhersage."
-                        )
+                    am_fix_stunde = london_zeit_zu_utc_stunde(10, 30)
+                    pm_fix_stunde = london_zeit_zu_utc_stunde(15, 0)
+                    am_fix_aktiv = jetzt_stunde == am_fix_stunde
+                    pm_fix_aktiv = jetzt_stunde == pm_fix_stunde
+                    st.write(
+                        f"🌅 **LBMA AM-Fix** ({utc_stunde_zu_lokal(am_fix_stunde)} Uhr deine Zeit): "
+                        f"{'🟢 JETZT AKTIV' if am_fix_aktiv else '⚪ nicht aktiv'}"
+                    )
+                    st.write(
+                        f"🌇 **LBMA PM-Fix** ({utc_stunde_zu_lokal(pm_fix_stunde)} Uhr deine Zeit): "
+                        f"{'🟢 JETZT AKTIV' if pm_fix_aktiv else '⚪ nicht aktiv'}"
+                    )
         else:
             st.warning("Coin konnte nicht aufgelöst werden.")
     else:
