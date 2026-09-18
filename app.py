@@ -85,29 +85,48 @@ def coingecko_preise_mit_zeit_holen(coingecko_id: str, tage: int = 90):
         return []
 
 
-def sitzungs_backtest(punkte, start_utc_stunde, vorschau_stunden=2):
-    """Reine Vergangenheitsstatistik: Wie hat sich der Kurs in der Historie
-    tatsächlich entwickelt, X Stunden nach Beginn dieser Sitzung? Keine
-    Vorhersage für die Zukunft, nur eine Beschreibung dessen, was bisher war."""
-    if len(punkte) < 20:
+def stunden_analyse(punkte, vorschau_stunden=2):
+    """Für jede der 24 UTC-Stunden: historische Ø-%-Veränderung X Stunden später.
+    Reine Vergangenheitsstatistik, keine Vorhersage - Grundlage für die grafische
+    24h-Übersicht (ersetzt die einzelnen Sitzungs-Expander durch EIN Bild)."""
+    if len(punkte) < 50:
         return None
     zeiten = [datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc) for p in punkte]
     preise = [p[1] for p in punkte]
-    treffer = []
+    veraenderungen_je_stunde = {h: [] for h in range(24)}
     for i in range(len(punkte) - vorschau_stunden):
-        if zeiten[i].hour == start_utc_stunde:
-            veraenderung = (preise[i + vorschau_stunden] - preise[i]) / preise[i] * 100
-            treffer.append(veraenderung)
-    if len(treffer) < 5:
-        return None
-    serie = pd.Series(treffer)
-    return {
-        "anzahl": len(treffer),
-        "prozent_positiv": float((serie > 0).mean() * 100),
-        "durchschnitt": float(serie.mean()),
-        "schlechtester": float(serie.min()),
-        "bester": float(serie.max()),
-    }
+        stunde = zeiten[i].hour
+        veraenderung = (preise[i + vorschau_stunden] - preise[i]) / preise[i] * 100
+        veraenderungen_je_stunde[stunde].append(veraenderung)
+    ergebnis = {}
+    for h, werte in veraenderungen_je_stunde.items():
+        if len(werte) >= 5:
+            ergebnis[h] = {
+                "durchschnitt": sum(werte) / len(werte),
+                "anzahl": len(werte),
+                "prozent_positiv": sum(1 for w in werte if w > 0) / len(werte) * 100,
+            }
+    return ergebnis if ergebnis else None
+
+
+def stunden_chart(ergebnis, ziel_zone=LOKALE_ZEITZONE):
+    zeilen = []
+    for utc_stunde, werte in ergebnis.items():
+        zeilen.append({"utc_stunde": utc_stunde, "lokal": utc_stunde_zu_lokal(utc_stunde, ziel_zone), **werte})
+    zeilen.sort(key=lambda z: z["lokal"])
+    x = [z["lokal"] for z in zeilen]
+    y = [z["durchschnitt"] for z in zeilen]
+    farben = ["#10b981" if v >= 0 else "#ef4444" for v in y]
+    fig = go.Figure(go.Bar(
+        x=x, y=y, marker_color=farben,
+        text=[f"{v:+.2f}%" for v in y], textposition="outside",
+        hovertext=[f"{z['anzahl']}× vorgekommen, {z['prozent_positiv']:.0f}% davon positiv" for z in zeilen],
+    ))
+    fig.update_layout(
+        height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark",
+        yaxis_title="Ø Veränderung (%)", xaxis_title="Uhrzeit (deine Zeit)",
+    )
+    return fig
 
 
 # --- 💾 PERSISTENTER SPEICHER (JSONBin – überlebt Neustarts & Neuladen) ---
@@ -941,14 +960,19 @@ with tab_sitzungen:
     )
 
     st.markdown("---")
-    st.subheader("📊 Historische Kursbewegung nach Sitzungsbeginn")
-    st.caption("Reine Vergangenheitsstatistik dieses Coins – keine Garantie, dass es wieder so kommt.")
+    st.subheader("📊 24-Stunden-Analyse: Historische Ø-Kursbewegung je Uhrzeit")
+    st.caption(
+        "Grün = historisch eher long-lastig (Kurs stieg im Schnitt), Rot = eher short-lastig "
+        "(Kurs fiel im Schnitt). Das ist eine Beschreibung der Vergangenheit, **keine Vorhersage "
+        "und keine Handelsempfehlung** für heute."
+    )
 
-    watchlist_optionen = st.session_state.zustand.get("watchlist", ["BTC", "ETH", "SOL"])
+    watchlist_optionen = st.session_state.zustand.get("watchlist", ["BTC", "ETH", "SOL", "PAXG"])
     if watchlist_optionen:
-        coin_auswahl = st.selectbox("Coin auswählen:", options=watchlist_optionen, key="sitzung_coin")
+        index_gold = watchlist_optionen.index("PAXG") if "PAXG" in watchlist_optionen else 0
+        coin_auswahl = st.selectbox("Coin auswählen:", options=watchlist_optionen, index=index_gold, key="sitzung_coin")
         vorschau_stunden = st.slider(
-            "Kursentwicklung wie viele Stunden nach Sitzungsbeginn betrachten?",
+            "Kursentwicklung wie viele Stunden später betrachten?",
             min_value=1, max_value=6, value=2, key="sitzung_vorschau",
         )
 
@@ -957,16 +981,23 @@ with tab_sitzungen:
             with st.spinner("Werte Historie aus…"):
                 punkte = coingecko_preise_mit_zeit_holen(coingecko_id, tage=90)
 
-            for s in sitzungen:
-                with st.expander(f"{s['name']} – Öffnung ({utc_stunde_zu_lokal(s['start_utc'])} Uhr deine Zeit)"):
-                    ergebnis = sitzungs_backtest(punkte, s["start_utc"], vorschau_stunden)
-                    if ergebnis is None:
-                        st.info("Nicht genug historische Daten für eine verlässliche Aussage.")
-                    else:
-                        st.write(f"Aufgetreten: **{ergebnis['anzahl']}×** in den letzten 90 Tagen")
-                        st.write(f"Kurs höher nach {vorschau_stunden}h: **{ergebnis['prozent_positiv']:.0f}%** der Fälle")
-                        st.write(f"Ø Veränderung: **{ergebnis['durchschnitt']:+.2f}%**")
-                        st.write(f"Beste / schlechteste Entwicklung: **{ergebnis['bester']:+.2f}%** / **{ergebnis['schlechtester']:+.2f}%**")
+            ergebnis = stunden_analyse(punkte, vorschau_stunden)
+            if ergebnis is None:
+                st.info("Nicht genug historische Daten für eine verlässliche Aussage.")
+            else:
+                st.plotly_chart(stunden_chart(ergebnis), use_container_width=True)
+                bullischste = max(ergebnis.items(), key=lambda kv: kv[1]["durchschnitt"])
+                baerischste = min(ergebnis.items(), key=lambda kv: kv[1]["durchschnitt"])
+                c1, c2 = st.columns(2)
+                c1.metric(
+                    f"Historisch stärkste Stunde ({utc_stunde_zu_lokal(bullischste[0])} Uhr)",
+                    f"{bullischste[1]['durchschnitt']:+.2f}%",
+                )
+                c2.metric(
+                    f"Historisch schwächste Stunde ({utc_stunde_zu_lokal(baerischste[0])} Uhr)",
+                    f"{baerischste[1]['durchschnitt']:+.2f}%",
+                )
+                st.caption(f"Basis: letzte 90 Tage, {coin_auswahl}. Werte je Stunde beruhen auf mindestens 5 historischen Vorkommen.")
         else:
             st.warning("Coin konnte nicht aufgelöst werden.")
     else:
