@@ -748,13 +748,42 @@ with tab_beobachtung:
     watchlist = st.session_state.zustand["watchlist"]
     optionen = list(TIMEFRAME_OPTIONEN.keys())
 
+    # Einmal alle Coins laden (Netzwerk-Aufrufe sind gecacht, kostet also keine
+    # zusätzlichen Anfragen) - Ergebnis wird für Übersicht + Hauptliste genutzt.
+    alle_ergebnisse = {}
     for ticker in list(watchlist):
         select_key = f"select_{ticker}"
         if select_key in st.session_state and st.session_state[select_key] not in optionen:
             del st.session_state[select_key]  # alte Auswahl aus vorheriger Zeitraum-Umstellung verwerfen
-        aktueller_zeitraum = st.session_state.get(select_key, optionen[1])
+        zeitraum_fuer_ticker = st.session_state.get(select_key, optionen[1])
         with st.spinner(f"Lade {ticker}…"):
-            daten, fehler = coin_daten_laden(ticker, aktueller_zeitraum)
+            d, f = coin_daten_laden(ticker, zeitraum_fuer_ticker)
+        alle_ergebnisse[ticker] = (d, f, zeitraum_fuer_ticker)
+
+    erfolgreiche = {t: d for t, (d, f, zr) in alle_ergebnisse.items() if d}
+
+    if erfolgreiche:
+        bullisch_n = sum(1 for d in erfolgreiche.values() if "bullisch" in d["kategorie"])
+        baerisch_n = sum(1 for d in erfolgreiche.values() if "bärisch" in d["kategorie"])
+        neutral_n = len(erfolgreiche) - bullisch_n - baerisch_n
+        st.markdown(
+            f"**📋 Watchlist-Überblick:** 🟢 {bullisch_n} bullisch · 🟡 {neutral_n} neutral · 🔴 {baerisch_n} bärisch"
+        )
+
+        with st.expander("📊 Volatilitäts-Ranking (ATR) – unruhigste zuerst"):
+            rang_liste = []
+            for ticker, d in erfolgreiche.items():
+                atr_abs = atr_wert(d["highs"], d["lows"], d["closes"])
+                if atr_abs and d["preis"]:
+                    rang_liste.append({"Coin": ticker, "ATR (%)": round(atr_abs / d["preis"] * 100, 2)})
+            if rang_liste:
+                rang_liste.sort(key=lambda r: r["ATR (%)"], reverse=True)
+                st.dataframe(pd.DataFrame(rang_liste), use_container_width=True, hide_index=True)
+            else:
+                st.caption("Noch keine ausreichende Historie für ein ATR-Ranking.")
+
+    for ticker in list(watchlist):
+        daten, fehler, aktueller_zeitraum = alle_ergebnisse[ticker]
 
         st.markdown("---")
         if daten is None:
