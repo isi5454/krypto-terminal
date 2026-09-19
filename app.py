@@ -18,6 +18,21 @@ API_KEY = st.secrets["JSONBIN_API_KEY"]
 # Wichtig: NICHT Binance, weil Binance Anfragen von Cloud-Servern (AWS/GCP) blockiert -
 # dasträfe sowohl Streamlit Cloud als auch GitHub Actions. CoinGecko blockiert das nicht.
 COINGECKO_BASIS = "https://api.coingecko.com/api/v3"
+
+# Angenommene Round-Trip-Kosten (Börsengebühr + Slippage) - macht Backtest/Vorwärts-
+# Tracking realistischer statt mit 0% Kosten zu rechnen. Grobe, gängige Schätzung,
+# reale Kosten hängen von Börse/Coin/Ordergröße ab.
+GEBUEHREN_PROZENT = 0.2
+
+
+def stichproben_label(anzahl):
+    """Kennzeichnet, wie viel Gewicht eine Backtest-Zahl statistisch verdient."""
+    if anzahl < 10:
+        return f"⚠️ Geringe Stichprobe (n={anzahl})"
+    elif anzahl < 30:
+        return f"🟡 Mittlere Stichprobe (n={anzahl})"
+    else:
+        return f"✅ Solide Basis (n={anzahl})"
 JSONBIN_BASIS = "https://api.jsonbin.io/v3/b"
 
 TICKER_ZU_ID = {
@@ -85,10 +100,16 @@ def aktien_snapshot_auswerten(quote):
     preis = quote["c"]
     pc = quote.get("pc") or 0
     o = quote.get("o") or 0
+    alter_stunden = None
+    zeitstempel = quote.get("t")
+    if zeitstempel:
+        letzte_aktualisierung = datetime.fromtimestamp(zeitstempel, tz=timezone.utc)
+        alter_stunden = (datetime.now(timezone.utc) - letzte_aktualisierung).total_seconds() / 3600
     return {
         "preis": preis,
         "veraenderung_tag": (preis - pc) / pc * 100 if pc else None,
         "veraenderung_seit_open": (preis - o) / o * 100 if o else None,
+        "alter_stunden": alter_stunden,
     }
 
 
@@ -506,7 +527,7 @@ def backtest_kategorie(closes, highs, lows, ziel_kategorie, vorschau=5):
     for i in range(start, ende):
         _, kategorie, _, _, _ = score_bei_index(serien, closes, highs, lows, i)
         if kategorie == ziel_kategorie:
-            veraenderung = (closes[i + vorschau] - closes[i]) / closes[i] * 100
+            veraenderung = (closes[i + vorschau] - closes[i]) / closes[i] * 100 - GEBUEHREN_PROZENT
             treffer.append(veraenderung)
     if len(treffer) < 5:
         return {"grund": "zu_wenig_faelle", "anzahl": len(treffer)}
@@ -571,7 +592,7 @@ def hypo_trades_aktualisieren(ticker, daten):
             veraenderung_pct = (
                 (preis - trade["einstieg"]) / trade["einstieg"] * 100 if trade["richtung"] == "long"
                 else (trade["einstieg"] - preis) / trade["einstieg"] * 100
-            )
+            ) - GEBUEHREN_PROZENT
             hypo["geschlossen"].insert(0, {
                 **trade, "ausstieg": preis, "ergebnis": ausgeloest,
                 "veraenderung_pct": veraenderung_pct,
@@ -918,10 +939,14 @@ with tab_beobachtung:
                         f"In der geladenen Historie trat **'{daten['kategorie']}'** bisher "
                         f"**{ergebnis['anzahl']}×** auf. 5 Kerzen später:"
                     )
+                    st.caption(stichproben_label(ergebnis["anzahl"]))
                     st.write(f"📈 Kurs höher: **{ergebnis['prozent_positiv']:.0f}%** der Fälle")
                     st.write(f"Ø Veränderung: **{ergebnis['durchschnitt']:+.2f}%**")
                     st.write(f"Beste / schlechteste Entwicklung: **{ergebnis['bester']:+.2f}%** / **{ergebnis['schlechtester']:+.2f}%**")
-                    st.caption("Reine Vergangenheitsstatistik dieses Coins – keine Vorhersage für das nächste Mal.")
+                    st.caption(
+                        f"Reine Vergangenheitsstatistik dieses Coins – keine Vorhersage für das nächste Mal. "
+                        f"Bereits um {GEBUEHREN_PROZENT}% geschätzte Handelskosten (Gebühr + Slippage) bereinigt."
+                    )
 
     st.markdown("---")
     with st.expander("📈 Vorwärts-Tracking: Wie hätten die Signale seitdem abgeschnitten?", expanded=False):
@@ -929,7 +954,8 @@ with tab_beobachtung:
             "Seit du diese App nutzt, wird automatisch mitgeschrieben: Zeigt ein Coin 'Stark bullisch/bärisch', "
             "wird notiert, was passiert wäre, wenn du dem gefolgt wärst (Ziel = Einstieg ± 2×ATR, "
             "Stop = Einstieg ∓ 1×ATR, Zeit-Ablauf nach 30 Tagen). "
-            "Läuft nur, während die App offen ist – anders als die Telegram-Alarme kein 24/7-Hintergrundprozess."
+            "Läuft nur, während die App offen ist – anders als die Telegram-Alarme kein 24/7-Hintergrundprozess. "
+            f"Ergebnisse sind bereits um {GEBUEHREN_PROZENT}% geschätzte Handelskosten pro Position bereinigt."
         )
         hypo = st.session_state.zustand.get("hypo_trades", {"offen": [], "geschlossen": []})
         offen_liste = hypo.get("offen", [])
@@ -948,6 +974,8 @@ with tab_beobachtung:
         m2.metric("Ziel / Stop / Zeit", f"{ziel_treffer}/{stop_treffer}/{zeit_treffer}")
         m3.metric("Geschlossen gesamt", len(geschlossen_liste))
         m4.metric("Ø Veränderung", f"{avg_veraenderung:+.2f}%")
+        if geschlossen_liste:
+            st.caption(stichproben_label(len(geschlossen_liste)))
 
         if offen_liste:
             st.write("**Offene hypothetische Positionen:**")
@@ -1246,10 +1274,16 @@ with tab_sitzungen:
             zeichen = "🟢" if (snapshot["veraenderung_tag"] or 0) >= 0 else "🔴"
             tag_text = f"{snapshot['veraenderung_tag']:+.2f}%" if snapshot["veraenderung_tag"] is not None else "—"
             open_text = f"{snapshot['veraenderung_seit_open']:+.2f}%" if snapshot["veraenderung_seit_open"] is not None else "—"
+            open_label = "seit Markteröffnung heute" if (snapshot["alter_stunden"] or 0) < 20 else "seit letzter Markteröffnung"
             st.write(
                 f"{zeichen} **{symbol}**: $ {snapshot['preis']:,.2f} — "
-                f"seit Vortagesschluss **{tag_text}** — seit Markteröffnung heute **{open_text}**"
+                f"seit Vortagesschluss **{tag_text}** — {open_label} **{open_text}**"
             )
+            if snapshot["alter_stunden"] is not None and snapshot["alter_stunden"] > 20:
+                st.caption(
+                    f"⚠️ Markt vermutlich geschlossen (Wochenende/Feiertag) – Werte vom letzten Handelstag, "
+                    f"vor {snapshot['alter_stunden']:.0f} Stunden aktualisiert."
+                )
 
 # ============================== TAB 5: TOP BEWEGUNGEN ==============================
 with tab_bewegungen:
@@ -1297,7 +1331,8 @@ with tab_bewegungen:
                 for coin in gewinner:
                     with st.spinner(f"Analysiere {coin['symbol']}…"):
                         wsk = richtungs_wahrscheinlichkeit(coin["id"], coin["veraenderung"]) if coin["id"] else None
-                    zusatz = f" · {'↑' if wsk['weiter_prozent'] > 50 else '↓'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']})" if wsk else ""
+                    warnung = " ⚠️" if wsk and wsk["anzahl"] < 10 else ""
+                    zusatz = f" · {'↑' if wsk['weiter_prozent'] > 50 else '↓'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']}{warnung})" if wsk else ""
                     st.write(f"🟢 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
 
             with col_verlierer:
@@ -1307,5 +1342,7 @@ with tab_bewegungen:
                 for coin in verlierer:
                     with st.spinner(f"Analysiere {coin['symbol']}…"):
                         wsk = richtungs_wahrscheinlichkeit(coin["id"], coin["veraenderung"]) if coin["id"] else None
-                    zusatz = f" · {'↓' if wsk['weiter_prozent'] > 50 else '↑'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']})" if wsk else ""
+                    warnung = " ⚠️" if wsk and wsk["anzahl"] < 10 else ""
+                    zusatz = f" · {'↓' if wsk['weiter_prozent'] > 50 else '↑'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']}{warnung})" if wsk else ""
                     st.write(f"🔴 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
+            st.caption("⚠️ = geringe Stichprobe, mit Vorsicht zu genießen.")
