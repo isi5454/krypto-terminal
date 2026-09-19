@@ -190,6 +190,7 @@ def zustand_laden():
         record.setdefault("portfolio", [])
         record.setdefault("alerts", [])
         record.setdefault("hypo_trades", {"offen": [], "geschlossen": []})
+        record.setdefault("portfolio_verlauf", [])
         if "PAXG" not in record["watchlist"]:
             record["watchlist"].append("PAXG")
             try:
@@ -599,6 +600,20 @@ def hypo_trades_aktualisieren(ticker, daten):
         zustand_speichern()
 
 
+def portfolio_verlauf_aktualisieren(gesamt_wert):
+    """Trägt den aktuellen Portfolio-Gesamtwert in den Verlauf ein - höchstens
+    einmal pro Stunde, damit der Speicher nicht mit jedem Seitenaufruf wächst."""
+    verlauf = st.session_state.zustand.setdefault("portfolio_verlauf", [])
+    jetzt = datetime.now(timezone.utc)
+    if verlauf:
+        letzter_zeit = datetime.fromisoformat(verlauf[-1]["zeit"])
+        if (jetzt - letzter_zeit).total_seconds() < 3600:
+            return
+    verlauf.append({"zeit": jetzt.isoformat(), "wert": round(gesamt_wert, 2)})
+    st.session_state.zustand["portfolio_verlauf"] = verlauf[-200:]
+    zustand_speichern()
+
+
 def coin_daten_laden(ticker: str, intervall_label: str):
     endpoint, aggregate = TIMEFRAME_OPTIONEN.get(intervall_label, ("histohour", 1))
     df, fehler = cryptocompare_ohlc_holen(ticker, endpoint, aggregate)
@@ -1004,6 +1019,18 @@ with tab_portfolio:
         gesamt_gv = gesamt_wert - gesamt_einsatz
         gesamt_gv_prozent = (gesamt_gv / gesamt_einsatz * 100) if gesamt_einsatz else 0
         st.markdown(f"**Gesamtwert:** $ {gesamt_wert:,.2f} &nbsp;|&nbsp; **Gesamt G/V:** $ {gesamt_gv:,.2f} ({gesamt_gv_prozent:.1f}%)")
+
+        portfolio_verlauf_aktualisieren(gesamt_wert)
+        verlauf = st.session_state.zustand.get("portfolio_verlauf", [])
+        if len(verlauf) >= 2:
+            st.markdown("**📈 Portfolio-Wertverlauf**")
+            verlauf_df = pd.DataFrame(verlauf)
+            verlauf_df["zeit"] = pd.to_datetime(verlauf_df["zeit"])
+            verlauf_df = verlauf_df.set_index("zeit")
+            st.line_chart(verlauf_df["wert"])
+            st.caption("Wird höchstens einmal pro Stunde aktualisiert, wenn du hier vorbeischaust.")
+        else:
+            st.caption("Der Wertverlauf wird sichtbar, sobald mehrmals über die Zeit vorbeigeschaut wurde.")
 
         loeschen_optionen = ["–"] + [f"{p['id']}: {p['ticker']} ({p['menge']})" for p in portfolio]
         auswahl = st.selectbox("Position entfernen:", options=loeschen_optionen, key="portfolio_remove_select")
