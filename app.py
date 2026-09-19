@@ -331,22 +331,53 @@ def coingecko_markt_uebersicht(seiten: int = 2):
 
 
 def top_bewegungen(marktdaten, zeitraum="24h", schwelle=10.0, anzahl=10):
-    """Filtert/sortiert Coins nach absoluter %-Veränderung (beide Richtungen)."""
+    """Filtert Coins nach %-Veränderung und trennt in Gewinner/Verlierer."""
     feld = "price_change_percentage_1h_in_currency" if zeitraum == "1h" else "price_change_percentage_24h_in_currency"
-    kandidaten = []
+    gewinner, verlierer = [], []
     for coin in marktdaten:
         veraenderung = coin.get(feld)
         if veraenderung is None:
             continue
-        if abs(veraenderung) >= schwelle:
-            kandidaten.append({
-                "symbol": coin.get("symbol", "").upper(),
-                "name": coin.get("name"),
-                "preis": coin.get("current_price"),
-                "veraenderung": veraenderung,
-            })
-    kandidaten.sort(key=lambda k: abs(k["veraenderung"]), reverse=True)
-    return kandidaten[:anzahl]
+        eintrag = {
+            "id": coin.get("id"),
+            "symbol": coin.get("symbol", "").upper(),
+            "name": coin.get("name"),
+            "preis": coin.get("current_price"),
+            "veraenderung": veraenderung,
+        }
+        if veraenderung >= schwelle:
+            gewinner.append(eintrag)
+        elif veraenderung <= -schwelle:
+            verlierer.append(eintrag)
+    gewinner.sort(key=lambda k: k["veraenderung"], reverse=True)
+    verlierer.sort(key=lambda k: k["veraenderung"])
+    return gewinner[:anzahl], verlierer[:anzahl]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def richtungs_wahrscheinlichkeit(coingecko_id: str, aktuelle_veraenderung: float, vorschau_perioden: int = 1):
+    """Schaut in der EIGENEN Historie dieses Coins: Nach ähnlich starken Bewegungen
+    (gleiche Richtung wie jetzt) - ging es typischerweise weiter in die gleiche
+    Richtung, oder hat sich das Blatt eher gewendet? Reine Vergangenheitsstatistik,
+    keine Vorhersage - die %-Zahl ist eine historische Tendenz, keine Garantie."""
+    punkte = coingecko_preise_mit_zeit_holen(coingecko_id, tage=90)
+    if len(punkte) < 30:
+        return None
+    preise = [p[1] for p in punkte]
+    veraenderungen = [(preise[i] - preise[i - 1]) / preise[i - 1] * 100 for i in range(1, len(preise))]
+    schwelle = max(abs(aktuelle_veraenderung) * 0.5, 0.5)
+    richtung_positiv = aktuelle_veraenderung > 0
+    treffer = []
+    for i in range(len(veraenderungen) - vorschau_perioden - 1):
+        v = veraenderungen[i]
+        if (v > 0) == richtung_positiv and abs(v) >= schwelle:
+            folge_index = i + vorschau_perioden
+            folge_veraenderung = (preise[folge_index + 1] - preise[folge_index]) / preise[folge_index] * 100
+            treffer.append(folge_veraenderung)
+    if len(treffer) < 5:
+        return None
+    weiter_prozent = sum(1 for t in treffer if (t > 0) == richtung_positiv) / len(treffer) * 100
+    return {"anzahl": len(treffer), "weiter_prozent": weiter_prozent, "richtung_positiv": richtung_positiv}
 
 
 # --- 📐 INDIKATOREN ALS VOLLSTÄNDIGE ZEITREIHEN (für aktuelle Anzeige UND Backtest) ---
@@ -1185,18 +1216,37 @@ with tab_bewegungen:
         st.error("Marktdaten aktuell nicht abrufbar (API nicht erreichbar oder Rate-Limit).")
     else:
         zeitraum_code = "1h" if zeitraum_anzeige == "1 Stunde" else "24h"
-        treffer = top_bewegungen(marktdaten, zeitraum_code, schwelle, anzahl)
+        gewinner, verlierer = top_bewegungen(marktdaten, zeitraum_code, schwelle, anzahl)
 
-        if not treffer:
+        if not gewinner and not verlierer:
             st.info(
                 f"Aktuell kein Coin unter den Top 500 mit {schwelle:.0f}%+ Veränderung in {zeitraum_anzeige}. "
                 "Das ist normal – so starke Bewegungen sind selten. Schwellenwert oben ggf. senken."
             )
         else:
-            st.caption(f"{len(treffer)} Treffer, sortiert nach Stärke der Bewegung ({zeitraum_anzeige}):")
-            for coin in treffer:
-                richtung = "🟢" if coin["veraenderung"] > 0 else "🔴"
-                st.write(
-                    f"{richtung} **{coin['symbol']}** ({coin['name']}) — "
-                    f"$ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%** ({zeitraum_anzeige})"
-                )
+            st.caption(
+                "Der Pfeil zeigt, wie oft dieser Coin in seiner eigenen Historie nach ähnlich starken "
+                "Bewegungen in dieselbe Richtung weitergegangen ist – reine Vergangenheitsstatistik, "
+                "keine Vorhersage."
+            )
+            col_gewinner, col_verlierer = st.columns(2)
+
+            with col_gewinner:
+                st.markdown(f"**📈 Top Gewinner ({len(gewinner)})**")
+                if not gewinner:
+                    st.caption("Keine Treffer.")
+                for coin in gewinner:
+                    with st.spinner(f"Analysiere {coin['symbol']}…"):
+                        wsk = richtungs_wahrscheinlichkeit(coin["id"], coin["veraenderung"]) if coin["id"] else None
+                    zusatz = f" · {'↑' if wsk['weiter_prozent'] > 50 else '↓'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']})" if wsk else ""
+                    st.write(f"🟢 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
+
+            with col_verlierer:
+                st.markdown(f"**📉 Top Verlierer ({len(verlierer)})**")
+                if not verlierer:
+                    st.caption("Keine Treffer.")
+                for coin in verlierer:
+                    with st.spinner(f"Analysiere {coin['symbol']}…"):
+                        wsk = richtungs_wahrscheinlichkeit(coin["id"], coin["veraenderung"]) if coin["id"] else None
+                    zusatz = f" · {'↓' if wsk['weiter_prozent'] > 50 else '↑'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']})" if wsk else ""
+                    st.write(f"🔴 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
