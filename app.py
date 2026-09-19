@@ -239,7 +239,7 @@ def coingecko_id_ermitteln(ticker: str):
     return None
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def cryptocompare_ohlc_holen(ticker: str, endpoint: str, aggregate: int, limit: int = 300):
     """Echte OHLC-Kerzen (inkl. Volumen) von CryptoCompare - liefert Minuten-,
     Stunden- oder Tages-Granularität je nach endpoint/aggregate.
@@ -402,12 +402,10 @@ def indikator_serien_berechnen(closes, highs, lows):
     }
 
 
-def score_bei_index(serien, closes, highs, lows, i, fib_fenster=100):
-    """Kombiniert 6 Indikatoren zu einem Score (-6 bis +6) und liefert die Gründe
+def score_bei_index(serien, closes, highs, lows, i):
+    """Kombiniert 5 Indikatoren zu einem Score (-5 bis +5) und liefert die Gründe
     in Klartext. Rein beschreibend, was die Indikatoren JETZT zeigen -
-    keine Vorhersage und keine Handlungsempfehlung.
-    Fibonacci nutzt bewusst nur ein RÜCKBLICKENDES Fenster (kein Blick in die
-    Zukunft) - sonst wäre der Backtest weiter unten geschönt."""
+    keine Vorhersage und keine Handlungsempfehlung."""
     preis = closes[i]
     rsi_wert = serien["rsi"].iloc[i]
     macd_wert = serien["macd"].iloc[i]
@@ -446,27 +444,11 @@ def score_bei_index(serien, closes, highs, lows, i, fib_fenster=100):
         else:
             score -= 1; gruende.append("Preis unter Trend-SMA(50)")
 
-    # 6. Faktor: Fibonacci - nur rückblickendes Fenster, kein Blick in die Zukunft
-    fenster_start = max(0, i - fib_fenster + 1)
-    fib_level_lokal = fibonacci_level_berechnen(highs[fenster_start:i + 1], lows[fenster_start:i + 1])
-    if fib_level_lokal and i >= fenster_start + 10:
-        tiefstes_kuerzlich = min(lows[max(fenster_start, i - 2):i + 1])
-        hoechstes_kuerzlich = max(highs[max(fenster_start, i - 2):i + 1])
-        for name, wert in fib_level_lokal.items():
-            if wert <= 0:
-                continue
-            if abs(tiefstes_kuerzlich - wert) / wert * 100 < 1.0 and preis > wert:
-                score += 1; gruende.append(f"Preis hat Fib-Level {name} als Unterstützung bestätigt")
-                break
-            if abs(hoechstes_kuerzlich - wert) / wert * 100 < 1.0 and preis < wert:
-                score -= 1; gruende.append(f"Preis an Fib-Level {name} abgewiesen")
-                break
-
-    if score >= 4:
+    if score >= 3:
         kategorie = "Stark bullisch"
     elif score >= 1:
         kategorie = "Leicht bullisch"
-    elif score <= -4:
+    elif score <= -3:
         kategorie = "Stark bärisch"
     elif score <= -1:
         kategorie = "Leicht bärisch"
@@ -505,34 +487,6 @@ def backtest_kategorie(closes, highs, lows, ziel_kategorie, vorschau=5):
         "schlechtester": float(serie.min()),
         "bester": float(serie.max()),
     }
-
-
-def fibonacci_level_berechnen(highs, lows):
-    """Fibonacci-Retracement-Level zwischen höchstem Hoch und tiefstem Tief der
-    geladenen Historie. Reine Referenz-Zonen für möglichen Support/Widerstand,
-    kein Kauf-/Verkaufssignal - der Markt muss ein Level nicht respektieren."""
-    hoch = max(highs)
-    tief = min(lows)
-    spanne = hoch - tief
-    if spanne <= 0:
-        return None
-    return {
-        "0.0%": hoch,
-        "23.6%": hoch - spanne * 0.236,
-        "38.2%": hoch - spanne * 0.382,
-        "50.0%": hoch - spanne * 0.5,
-        "61.8%": hoch - spanne * 0.618,
-        "78.6%": hoch - spanne * 0.786,
-        "100.0%": tief,
-    }
-
-
-def naechstes_fib_level(preis, level_dict):
-    if not level_dict:
-        return None
-    name, wert = min(level_dict.items(), key=lambda kv: abs(kv[1] - preis))
-    abstand_prozent = abs(preis - wert) / preis * 100
-    return name, wert, abstand_prozent
 
 
 def bollinger_baender_serie(werte, periode=20, anzahl_std=2):
@@ -642,9 +596,6 @@ def coin_daten_laden(ticker: str, intervall_label: str):
     letzter_index = len(closes) - 1
     score, kategorie, gruende, trend_stark, adx_wert = score_bei_index(serien, closes, highs, lows, letzter_index)
 
-    fib_level = fibonacci_level_berechnen(highs, lows)
-    fib_naechstes = naechstes_fib_level(closes[-1], fib_level) if fib_level else None
-
     return {
         "df": df,
         "preis": closes_chart[-1],
@@ -661,11 +612,10 @@ def coin_daten_laden(ticker: str, intervall_label: str):
         "volumen_aktuell": volumen_liste[-1] if volumen_liste else None,
         "volumen_schnitt": pd.Series(volumen_liste).rolling(min(20, max(len(volumen_liste) - 1, 1))).mean().iloc[-1] if volumen_liste else None,
         "closes": closes, "highs": highs, "lows": lows,
-        "fib_level": fib_level, "fib_naechstes": fib_naechstes,
     }, None
 
 
-def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True, projektion=None, aktueller_preis=None, vorschau=5):
+def candlestick_chart(df: pd.DataFrame, projektion=None, aktueller_preis=None, vorschau=5):
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["zeit"], open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="Kurs",
@@ -673,20 +623,6 @@ def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True, proje
     fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_oben"], line=dict(width=1, color="rgba(150,150,255,0.5)"), name="BB oben"))
     fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_unten"], line=dict(width=1, color="rgba(150,150,255,0.5)"), name="BB unten", fill="tonexty", fillcolor="rgba(150,150,255,0.07)"))
     fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_mittel"], line=dict(width=1, dash="dot", color="orange"), name="BB Mitte"))
-
-    if fib_anzeigen and fib_level:
-        fib_farben = {
-            "0.0%": "rgba(180,180,180,0.5)", "23.6%": "rgba(255,200,120,0.6)",
-            "38.2%": "rgba(255,160,90,0.6)", "50.0%": "rgba(255,120,120,0.7)",
-            "61.8%": "rgba(255,90,90,0.7)", "78.6%": "rgba(255,60,60,0.6)",
-            "100.0%": "rgba(180,180,180,0.5)",
-        }
-        for name, wert in fib_level.items():
-            fig.add_hline(
-                y=wert, line_dash="dot", line_width=1, line_color=fib_farben.get(name, "gray"),
-                annotation_text=f"Fib {name}", annotation_position="right",
-                annotation_font_size=10,
-            )
 
     # Projektions-Zone: KEINE Ziel-Linie (das wäre eine Vorhersage), sondern eine
     # Bandbreite aus dem historischen Backtest - beste/schlechteste Entwicklung nach
@@ -717,6 +653,7 @@ def candlestick_chart(df: pd.DataFrame, fib_level=None, fib_anzeigen=True, proje
     fig.update_layout(
         height=420, margin=dict(l=10, r=10, t=10, b=10),
         xaxis_rangeslider_visible=False, template="plotly_dark", showlegend=False,
+        dragmode="pan",
     )
     return fig
 
@@ -808,7 +745,7 @@ with tab_beobachtung:
         with c_ampel:
             st.markdown(f"## {ampel}")
         with c_info:
-            st.markdown(f"**{ticker}** — $ {daten['preis']:,.2f} — **{ampel_text}** ({score:+d}/6)")
+            st.markdown(f"**{ticker}** — $ {daten['preis']:,.2f} — **{ampel_text}** ({score:+d}/5)")
             if daten["gruende"]:
                 st.caption(" · ".join(daten["gruende"][:3]))
             else:
@@ -818,7 +755,6 @@ with tab_beobachtung:
             neues_intervall = st.selectbox(
                 "Zeitraum:", options=optionen, index=optionen.index(aktueller_zeitraum), key=f"select_{ticker}"
             )
-            fib_anzeigen = st.checkbox("📐 Fibonacci-Level anzeigen", value=True, key=f"fib_toggle_{ticker}")
             projektion_anzeigen = st.checkbox("🟣 Projektions-Zone anzeigen", value=False, key=f"projektion_toggle_{ticker}")
 
             with st.spinner("Werte Historie aus…"):
@@ -829,12 +765,14 @@ with tab_beobachtung:
 
             st.plotly_chart(
                 candlestick_chart(
-                    daten["df"], fib_level=daten["fib_level"], fib_anzeigen=fib_anzeigen,
+                    daten["df"],
                     projektion=backtest_ergebnis if projektion_anzeigen else None,
                     aktueller_preis=daten["preis"], vorschau=5,
                 ),
                 use_container_width=True,
+                config={"scrollZoom": True},
             )
+            st.caption("↔️ Ziehen zum Verschieben, Mausrad/Pinch zum Zoomen – wie bei Binance.")
             if projektion_anzeigen and backtest_ergebnis.get("grund") == "ok":
                 st.caption(
                     "🟣 Violette Zone im Chart: Spanne aus bester/schlechtester historischer Entwicklung "
@@ -846,7 +784,7 @@ with tab_beobachtung:
             with c1:
                 st.write("🎯 Signal-Score:")
                 zusatz = " (Long-Tendenz)" if ampel == "🟢" else " (Short-Tendenz)" if ampel == "🔴" else ""
-                anzeige = f"{kategorie}{zusatz} ({score:+d}/6)"
+                anzeige = f"{kategorie}{zusatz} ({score:+d}/5)"
                 if ampel == "🟢":
                     st.success(f"🟢 {anzeige}")
                 elif ampel == "🔴":
@@ -875,10 +813,6 @@ with tab_beobachtung:
                     st.write(f"Unten: **$ {daten['bb_unten']:,.2f}**")
                 else:
                     st.write("Noch zu wenig Historie.")
-                if daten["fib_naechstes"]:
-                    fib_name, fib_wert, fib_abstand = daten["fib_naechstes"]
-                    st.write(f"Nächstes Fib-Level: **{fib_name}** (${fib_wert:,.2f})")
-                    st.caption(f"Abstand: {fib_abstand:.2f}% – reine Referenzzone, kein Signal")
 
             with c4:
                 st.write("📦 Volumen (24h, ca.):")
@@ -1167,7 +1101,7 @@ with tab_sitzungen:
                         live_ampel, live_text = "🔴", "Bärisch (Short-Tendenz)"
                     else:
                         live_ampel, live_text = "🟡", "Neutral"
-                    st.write(f"**Aktuelles Live-Signal ({coin_auswahl}):** {live_ampel} {live_text} ({live_daten['score']:+d}/6)")
+                    st.write(f"**Aktuelles Live-Signal ({coin_auswahl}):** {live_ampel} {live_text} ({live_daten['score']:+d}/5)")
                 else:
                     st.warning(f"Aktuelles Live-Signal für {coin_auswahl} nicht verfügbar – Grund: {live_fehler}")
 
