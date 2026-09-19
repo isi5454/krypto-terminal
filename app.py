@@ -240,7 +240,7 @@ def coingecko_id_ermitteln(ticker: str):
     return None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def cryptocompare_ohlc_holen(ticker: str, endpoint: str, aggregate: int, limit: int = 300):
     """Echte OHLC-Kerzen (inkl. Volumen) von CryptoCompare - liefert Minuten-,
     Stunden- oder Tages-Granularität je nach endpoint/aggregate.
@@ -1178,7 +1178,10 @@ with tab_sitzungen:
                 )
 
                 with st.spinner("Lade aktuelles Signal…"):
-                    live_daten, live_fehler = coin_daten_laden(coin_auswahl, "🕐 1 Stunde")
+                    zeitraum_fuer_live = st.session_state.get(f"select_{coin_auswahl}", "🕐 1 Stunde")
+                    if zeitraum_fuer_live not in TIMEFRAME_OPTIONEN:
+                        zeitraum_fuer_live = "🕐 1 Stunde"
+                    live_daten, live_fehler = coin_daten_laden(coin_auswahl, zeitraum_fuer_live)
 
                 if live_daten:
                     live_kat = live_daten["kategorie"]
