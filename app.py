@@ -352,6 +352,37 @@ def coingecko_markt_uebersicht(seiten: int = 2):
     return alle
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def status_pruefen():
+    """Leichte Erreichbarkeits-Checks der verwendeten Datenquellen. Nutzt möglichst
+    minimale Anfragen, um selbst kein nennenswertes Kontingent zu verbrauchen."""
+    ergebnisse = {}
+
+    df, fehler = cryptocompare_ohlc_holen("BTC", "histoday", 1, limit=2)
+    ergebnisse["CryptoCompare"] = (df is not None, fehler)
+
+    try:
+        r = requests.get(f"{COINGECKO_BASIS}/ping", timeout=10)
+        ergebnisse["CoinGecko"] = (r.status_code == 200, None if r.status_code == 200 else f"HTTP {r.status_code}")
+    except requests.RequestException as e:
+        ergebnisse["CoinGecko"] = (False, str(e))
+
+    if FINNHUB_API_KEY:
+        quote = finnhub_quote_holen("AAPL")
+        ok = bool(quote and quote.get("c") not in (None, 0))
+        ergebnisse["Finnhub"] = (ok, None if ok else "Keine gültige Antwort")
+    else:
+        ergebnisse["Finnhub"] = (None, "Kein Key in den Secrets gesetzt")
+
+    try:
+        r = requests.get(f"{JSONBIN_BASIS}/{BIN_ID}/latest", headers={"X-Master-Key": API_KEY}, timeout=10)
+        ergebnisse["JSONBin (Speicher)"] = (r.status_code == 200, None if r.status_code == 200 else f"HTTP {r.status_code}")
+    except requests.RequestException as e:
+        ergebnisse["JSONBin (Speicher)"] = (False, str(e))
+
+    return ergebnisse
+
+
 def top_bewegungen(marktdaten, zeitraum="24h", schwelle=10.0, anzahl=10):
     """Filtert Coins nach %-Veränderung und trennt in Gewinner/Verlierer."""
     feld = "price_change_percentage_1h_in_currency" if zeitraum == "1h" else "price_change_percentage_24h_in_currency"
@@ -735,8 +766,8 @@ st.caption(
 )
 st.caption("Powered by CryptoCompare")
 
-tab_beobachtung, tab_portfolio, tab_alarme, tab_sitzungen, tab_bewegungen = st.tabs(
-    ["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme", "🌍 Handelssitzungen", "🔥 Top Bewegungen"]
+tab_beobachtung, tab_portfolio, tab_alarme, tab_sitzungen, tab_bewegungen, tab_status = st.tabs(
+    ["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme", "🌍 Handelssitzungen", "🔥 Top Bewegungen", "🩺 Status"]
 )
 
 # ============================== TAB 1: BEOBACHTUNG ==============================
@@ -817,6 +848,47 @@ with tab_beobachtung:
                 st.dataframe(pd.DataFrame(rang_liste), use_container_width=True, hide_index=True)
             else:
                 st.caption("Noch keine ausreichende Historie für ein ATR-Ranking.")
+
+        with st.expander("🏆 Gesamt-Erfolgsbilanz (Backtest + Vorwärts-Tracking, alle Coins)"):
+            st.caption(
+                "Ehrliche Gesamt-Einschätzung: Trifft das System bei deinen aktuellen Coins insgesamt "
+                "eher zu oder nicht? Reine Vergangenheitsstatistik, keine Garantie für die Zukunft."
+            )
+            gesamt_anzahl = 0
+            gewichtete_durchschnitt = 0.0
+            gewichtete_positiv = 0.0
+            for ticker, d in erfolgreiche.items():
+                bt = backtest_kategorie(tuple(d["closes"]), tuple(d["highs"]), tuple(d["lows"]), d["kategorie"], vorschau=5)
+                if bt.get("grund") == "ok":
+                    n = bt["anzahl"]
+                    gesamt_anzahl += n
+                    gewichtete_durchschnitt += n * bt["durchschnitt"]
+                    gewichtete_positiv += n * bt["prozent_positiv"]
+
+            st.markdown("**📊 Rückblickender Backtest** (aktuelle Signale aller Coins kombiniert):")
+            if gesamt_anzahl > 0:
+                st.write(
+                    f"Kurs höher in **{gewichtete_positiv / gesamt_anzahl:.0f}%** der {gesamt_anzahl} Fälle, "
+                    f"Ø **{gewichtete_durchschnitt / gesamt_anzahl:+.2f}%** (bereits um Gebühren bereinigt)"
+                )
+                st.caption(stichproben_label(gesamt_anzahl))
+            else:
+                st.info("Noch nicht genug Backtest-Daten über die Watchlist hinweg.")
+
+            hypo_bilanz = st.session_state.zustand.get("hypo_trades", {"offen": [], "geschlossen": []})
+            geschlossen_bilanz = hypo_bilanz.get("geschlossen", [])
+            st.markdown("**📈 Vorwärts-Tracking** (tatsächlich seitdem verfolgt):")
+            if geschlossen_bilanz:
+                ziel_n = sum(1 for t in geschlossen_bilanz if t["ergebnis"] == "Ziel erreicht")
+                stop_n = sum(1 for t in geschlossen_bilanz if t["ergebnis"] == "Stop erreicht")
+                avg = sum(t["veraenderung_pct"] for t in geschlossen_bilanz) / len(geschlossen_bilanz)
+                st.write(
+                    f"**{ziel_n}** Ziel / **{stop_n}** Stop von **{len(geschlossen_bilanz)}** geschlossenen "
+                    f"Positionen, Ø **{avg:+.2f}%**"
+                )
+                st.caption(stichproben_label(len(geschlossen_bilanz)))
+            else:
+                st.info("Noch keine geschlossenen Vorwärts-Tracking-Positionen.")
 
     for ticker in list(watchlist):
         daten, fehler, aktueller_zeitraum = alle_ergebnisse[ticker]
@@ -1346,3 +1418,32 @@ with tab_bewegungen:
                     zusatz = f" · {'↓' if wsk['weiter_prozent'] > 50 else '↑'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']}{warnung})" if wsk else ""
                     st.write(f"🔴 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
             st.caption("⚠️ = geringe Stichprobe, mit Vorsicht zu genießen.")
+
+# ============================== TAB 6: STATUS ==============================
+with tab_status:
+    st.subheader("🩺 System-Status")
+    st.caption(
+        "Prüft, ob die verwendeten Datenquellen gerade erreichbar sind. Nutzt minimale "
+        "Anfragen und wird alle 10 Minuten automatisch neu geprüft."
+    )
+    if st.button("🔄 Jetzt neu prüfen", key="status_refresh_btn"):
+        status_pruefen.clear()
+        st.rerun()
+
+    with st.spinner("Prüfe Datenquellen…"):
+        status_ergebnisse = status_pruefen()
+
+    for name, (ok, fehler) in status_ergebnisse.items():
+        if ok is True:
+            st.success(f"✅ **{name}**: erreichbar")
+        elif ok is False:
+            st.error(f"❌ **{name}**: {fehler}")
+        else:
+            st.info(f"➖ **{name}**: {fehler}")
+
+    st.markdown("---")
+    st.caption(
+        "**Telegram / GitHub Actions** lassen sich von hier aus nicht prüfen – der Bot-Token liegt "
+        "nur in den GitHub-Secrets, nicht in denen dieser App. Status dafür direkt auf GitHub im "
+        "Reiter \"Actions\" nachsehen (grüner Haken = letzter Lauf erfolgreich)."
+    )
