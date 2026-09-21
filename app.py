@@ -352,15 +352,22 @@ def coingecko_markt_uebersicht(seiten: int = 2):
     return alle
 
 
+MEME_COIN_IDS = {
+    "DOGE": "dogecoin", "SHIB": "shiba-inu", "PEPE": "pepe",
+    "BONK": "bonk", "FLOKI": "floki", "WIF": "dogwifcoin",
+}
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def coingecko_meme_coins_holen():
-    """Coins der offiziellen CoinGecko-Kategorie 'meme-token' mit 1h/24h-Veränderung -
-    eine gezielte Anfrage statt eines Scans über alle Coins."""
+    """Kuratierte Liste eindeutiger, bekannter Meme-Coins (statt CoinGeckos teils
+    ungenauer 'meme-token'-Kategorie, die auch Nicht-Meme-Projekte enthalten kann)."""
+    ids = ",".join(MEME_COIN_IDS.values())
     try:
         r = requests.get(
             f"{COINGECKO_BASIS}/coins/markets",
             params={
-                "vs_currency": "usd", "category": "meme-token",
+                "vs_currency": "usd", "ids": ids,
                 "order": "market_cap_desc", "per_page": 250, "page": 1,
                 "price_change_percentage": "1h,24h", "sparkline": "false",
             },
@@ -1449,7 +1456,7 @@ with tab_bewegungen:
                 for coin in meme_alle:
                     zeichen = "🟢" if coin["veraenderung"] > 0 else "🔴"
                     st.write(f"{zeichen} **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**")
-                st.caption("Kategorie \"meme-token\" laut CoinGecko – ohne Richtungs-Pfeil, um Anfragen zu sparen.")
+                st.caption(f"Kuratierte Liste ({', '.join(MEME_COIN_IDS.keys())}) – ohne Richtungs-Pfeil, um Anfragen zu sparen.")
             st.caption("⚠️ = geringe Stichprobe, mit Vorsicht zu genießen.")
 
 # ============================== TAB 6: STATUS ==============================
