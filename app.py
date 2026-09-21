@@ -352,6 +352,26 @@ def coingecko_markt_uebersicht(seiten: int = 2):
     return alle
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def coingecko_meme_coins_holen():
+    """Coins der offiziellen CoinGecko-Kategorie 'meme-token' mit 1h/24h-Veränderung -
+    eine gezielte Anfrage statt eines Scans über alle Coins."""
+    try:
+        r = requests.get(
+            f"{COINGECKO_BASIS}/coins/markets",
+            params={
+                "vs_currency": "usd", "category": "meme-token",
+                "order": "market_cap_desc", "per_page": 250, "page": 1,
+                "price_change_percentage": "1h,24h", "sparkline": "false",
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException:
+        return []
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def status_pruefen():
     """Leichte Erreichbarkeits-Checks der verwendeten Datenquellen. Nutzt möglichst
@@ -1394,7 +1414,7 @@ with tab_bewegungen:
                 "Bewegungen in dieselbe Richtung weitergegangen ist – reine Vergangenheitsstatistik, "
                 "keine Vorhersage."
             )
-            col_gewinner, col_verlierer = st.columns(2)
+            col_gewinner, col_verlierer, col_meme = st.columns(3)
 
             with col_gewinner:
                 st.markdown(f"**📈 Top Gewinner ({len(gewinner)})**")
@@ -1417,6 +1437,19 @@ with tab_bewegungen:
                     warnung = " ⚠️" if wsk and wsk["anzahl"] < 10 else ""
                     zusatz = f" · {'↓' if wsk['weiter_prozent'] > 50 else '↑'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']}{warnung})" if wsk else ""
                     st.write(f"🔴 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
+
+            with col_meme:
+                with st.spinner("Lade Meme-Coins…"):
+                    meme_marktdaten = coingecko_meme_coins_holen()
+                meme_gewinner, meme_verlierer = top_bewegungen(meme_marktdaten, zeitraum_code, schwelle, anzahl)
+                meme_alle = meme_gewinner + meme_verlierer
+                st.markdown(f"**🐸 Meme-Coins ({len(meme_alle)})**")
+                if not meme_alle:
+                    st.caption("Keine Treffer bei diesem Schwellenwert.")
+                for coin in meme_alle:
+                    zeichen = "🟢" if coin["veraenderung"] > 0 else "🔴"
+                    st.write(f"{zeichen} **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**")
+                st.caption("Kategorie \"meme-token\" laut CoinGecko – ohne Richtungs-Pfeil, um Anfragen zu sparen.")
             st.caption("⚠️ = geringe Stichprobe, mit Vorsicht zu genießen.")
 
 # ============================== TAB 6: STATUS ==============================
