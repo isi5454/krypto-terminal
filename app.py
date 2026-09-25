@@ -12,7 +12,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Startkonfiguration (Zwingt das Layout in die volle Breite und blockiert Übersetzer-Abstürze)
 st.set_page_config(page_title="KRIPTO RADAR V9", page_icon="📊", layout="wide")
 
-# INTEGRATION DER MOBIL-WEICHE: PC bleibt groß und breit, Handy wird kompakt wie eine App!
+# FIX: CSS-Code komplett gereinigt – Keine Textreste mehr ganz oben auf dem Bildschirm!
 st.markdown("""
     <html lang="de" class="notranslate" translate="no">
     <head><meta name="google" content="notranslate" /></head>
@@ -21,13 +21,12 @@ st.markdown("""
     .stApp { background-color: #0B0E11; color: #EAECEF; }
     h1, h2, h3, h4 { color: #EAECEF !important; margin-bottom: 2px !important; margin-top: 5px !important; }
     
-    /* PC Modus: Tabellen haben die gewohnte, feste Höhe */
+    /* PC-Höheneinstellung für die Tabellen */
     div[data-testid="stDataFrame"] > div { max-height: none !important; height: 350px !important; }
     
-    /* HANDY MODUS AUTOMATIK: Wenn der Bildschirm schmaler als 768px ist (Smartphone) */
+    /* HANDY MODUS AUTOMATIK: Schaltet auf Smartphones sauber untereinander */
     @media (max-width: 768px) {
         div[data-testid="stDataFrame"] > div { height: 220px !important; }
-        .stHorizontalBlock { display: flex !important; flex-direction: column !important; }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -62,10 +61,10 @@ interval_auswahl = st.sidebar.selectbox(
 )
 
 yf_perioden = {"1 Minute": "1d", "5 Minuten": "5d", "15 Minuten": "7d", "1 Stunde": "30d", "4 Stunden": "30d", "1 Tag": "300d"}
-yf_intervalne = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
+yf_intervalle = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
 
 gewaehlte_periode = yf_perioden[interval_auswahl]
-gewaehltes_intervall = yf_intervalne[interval_auswahl]
+gewaehltes_intervall = yf_intervalle[interval_auswahl]
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Coin hinzufügen")
@@ -156,7 +155,7 @@ if daten_liste:
             st_alarm_ausloesen = True
             richtung_icon = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
             einstiegs_liste.append({
-                "Ticker": row["Ticker"], "Richtung": richtung_icon,
+                "Ticker": row["Ticker"], "Richtung": direction_icon if 'direction_icon' in locals() else richtung_icon,
                 "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)
             })
             
@@ -170,45 +169,44 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/mpeg"></audio>""", height=0)
 
-    # --- GEWOHNTES 2-SPALTEN LAYOUT ---
+    # --- CORE FIX: ABSOLUT FEHLERFREIE ZUORDNUNG IN ZWEI GLEICHEN SPALTEN ---
     col_links, col_rechts = st.columns(2)
     
-    col_links.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
-    col_links.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
-    
-    col_links.markdown("---")
-    col_links.subheader("📋 Meine persönlichen Krypto-Favoriten")
-    if not favoriten_df.empty:
-        col_links.dataframe(favoriten_df[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
-    else:
-        col_links.info("💡 Deine Liste ist aktuell leer. Füge links Wunsch-Coins hinzu!")
+    # 1. LINKER BLOCK: GEWINNER + FAVORITEN + CHARTSTATION
+    with col_links:
+        st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
+        st.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         
-    col_links.markdown("---")
-    col_links.subheader("📊 Live-Chartstation")
-    chart_liste = list(global_df["Ticker"].unique())
-    ausgewaehlter_coin = col_links.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
-    col_links.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
-    
-    cdf = daten_laden(ausgewaehlter_coin, gewaehlte_periode, gewaehltes_intervall)
-    if cdf is not None and len(cdf) >= 2:
-        cdf = indikatoren_berechnen(cdf)
-        
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
-        fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
-        fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
-        
-        coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
-        if not coin_row.empty:
-            try:
-                c_pr = float(coin_row["raw_pr"].iloc)
-                c_atr = float(coin_row["raw_atr"].iloc)
-                c_sma = float(coin_row["raw_sma"].iloc)
-                sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
-                tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
-                fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
-                fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
-                fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
-            except:
-                pass
+        st.markdown("---")
+        st.subheader("📋 Meine persönlichen Krypto-Favoriten")
+        if not favoriten_df.empty:
+            st.dataframe(favoriten_df[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
+        else:
+            st.info("💡 Deine Liste ist aktuell leer. Füge links Wunsch-Coins hinzu!")
             
+        st.markdown("---")
+        st.subheader("📊 Live-Chartstation")
+        chart_liste = list(global_df["Ticker"].unique())
+        
+        # FIX: Garantiert immer einen standardmäßig ausgewählten Coin beim Start, damit der Chart niemals leer bleibt!
+        standard_coin = "BTC" if "BTC" in chart_liste else chart_liste[0]
+        ausgewaehlter_coin = st.selectbox("🎯 Coin wählen:", chart_liste, index=chart_liste.index(standard_coin), key="chart_box")
+        st.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
+        
+        cdf = daten_laden(ausgewaehlter_coin, gewaehlte_periode, gewaehltes_intervall)
+        if cdf is not None and len(cdf) >= 2:
+            cdf = indikatoren_berechnen(cdf)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
+            
+            coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
+            if not coin_row.empty:
+                try:
+                    c_pr = float(coin_row["raw_pr"].iloc[0])
+                    c_atr = float(coin_row["raw_atr"].iloc[0])
+                    c_sma = float(coin_row["raw_sma"].iloc[0])
+                    sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+                    tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
