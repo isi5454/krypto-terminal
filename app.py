@@ -22,14 +22,12 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Cache für bereits gesendete Alarme initialisieren
 if "gesendete_alarme" not in st.session_state:
     st.session_state.gesendete_alarme = {}
 
 if "meine_favoriten" not in st.session_state:
     st.session_state.meine_favoriten = ["BTC", "ETH"]
 
-# Funktion zum Senden von Telegram-Nachrichten
 def send_telegram_message(message):
     try:
         token = st.secrets["TELEGRAM_TOKEN"]
@@ -131,7 +129,6 @@ if daten_liste:
             richtung_text = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
             einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": richtung_text, "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
             
-            # Telegram Push Logik
             coin_key = f"{row['Ticker']}_{richtung_text}"
             letzter_send_zeitpunkt = st.session_state.gesendete_alarme.get(coin_key, 0)
             if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:
@@ -192,4 +189,7 @@ if daten_liste:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
         st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         st.markdown("---")
-        # Hier ist Ihre originale Tabelle wieder da!
+        
+        # Absolute Fixierung: Die Tabelle wird HIER IMMER gerendert, egal ob voll oder leer
+        st.subheader(f"🔥 AKTUELLE COINS IM LIVE-EINSTIEG ({interval_auswahl})")
+        if einstiegs_liste:
