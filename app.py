@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Startkonfiguration (Verhindert automatische Browser-Übersetzungs-Abstürze)
+# Startkonfiguration (Zwingt das Layout in die volle Breite und blockiert Übersetzer-Abstürze)
 st.set_page_config(page_title="KRIPTO RADAR V9", page_icon="📊", layout="wide")
 
 st.markdown("""
@@ -43,7 +43,7 @@ def send_telegram_message(message):
 
 st.title("📊 KRIPTO SWING RADAR V9 – PRO TRADER TERMINAL")
 
-# --- SIDEBAR (DAS ORIGINAL-LAYOUT) ---
+# --- SIDEBAR ---
 st.sidebar.header("⚙️ Einstellungen")
 
 interval_auswahl = st.sidebar.selectbox(
@@ -151,18 +151,15 @@ if daten_liste:
                 "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)
             })
             
-            # Automatische Handy-Benachrichtigung abfeuern!
+            # Automatische Handy-Benachrichtigung über Telegram absenden
             coin_key = f"{row['Ticker']}_{richtung_icon}"
             letzter_send_zeitpunkt = st.session_state.gesendete_alarme.get(coin_key, 0)
-            if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:  # 15 Min Spam-Schutz
+            if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:  # 15 Minuten Spam-Schutz
                 msg = f"🔔 *NEUES TRADING SIGNAL*\n\n🪙 *Coin:* {row['Ticker']}-USD\n📊 *Richtung:* {richtung_icon}\n💵 *Einstieg:* ${round(c_pr, 2)}\n🛑 *SL:* ${round(sl_u, 2)}\n🎯 *TP:* ${round(tp_u, 2)}\n⏱️ *Intervall:* {interval_auswahl}"
                 send_telegram_message(msg)
                 st.session_state.gesendete_alarme[coin_key] = aktueller_zeitstempel
 
-    if st_alarm_ausloesen:
-        st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/mpeg"></audio>""", height=0)
-
-    # --- GEWOHNTES 2-SPALTEN LAYOUT ---
+    # --- GEWOHNTES LAYOUT ---
     col_links, col_rechts = st.columns(2)
     
     with col_links:
@@ -209,3 +206,4 @@ if daten_liste:
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
     with col_rechts:
+        st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
