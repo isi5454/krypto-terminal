@@ -126,16 +126,16 @@ if daten_liste:
             tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
             st_alarm_ausloesen = True
             
-            richtung_text = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
-            einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": richtung_text, "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
+            richtungs_icon = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
+            einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": richtungs_icon, "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
             
-            coin_key = f"{row['Ticker']}_{richtung_text}"
+            coin_key = f"{row['Ticker']}_{richtungs_icon}"
             letzter_send_zeitpunkt = st.session_state.gesendete_alarme.get(coin_key, 0)
             if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:
                 msg = (
                     f"🔔 *NEUES TRADING SIGNAL*\n\n"
                     f"🪙 *Coin:* {row['Ticker']}-USD\n"
-                    f"📊 *Richtung:* {richtung_text}\n"
+                    f"📊 *Richtung:* {richtungs_icon}\n"
                     f"💵 *Einstieg:* ${round(c_pr, 4 if c_pr < 1 else 2)}\n"
                     f"🛑 *Stop Loss (SL):* ${round(sl_u, 4 if sl_u < 1 else 2)}\n"
                     f"🎯 *Take Profit (TP):* ${round(tp_u, 4 if tp_u < 1 else 2)}\n"
@@ -147,7 +147,7 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/wav"></audio>""", height=0)
 
-    # Das originale 2-Spalten Layout
+    # 2-Spalten Layout wie gewohnt
     col_links, col_rechts = st.columns(2)
     with col_links:
         st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
@@ -190,6 +190,6 @@ if daten_liste:
         st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         st.markdown("---")
         
-        # Absolute Fixierung: Die Tabelle wird HIER IMMER gerendert, egal ob voll oder leer
+        # Tabelle sauber verankert
         st.subheader(f"🔥 AKTUELLE COINS IM LIVE-EINSTIEG ({interval_auswahl})")
         if einstiegs_liste:
