@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Zwingt das Layout in die volle Breite und blockiert Übersetzer-Abstürze
+# Startkonfiguration (Zwingt das Layout in die volle Breite und blockiert Übersetzer-Abstürze)
 st.set_page_config(page_title="KRIPTO RADAR V9", page_icon="📊", layout="wide")
 
 st.markdown("""
@@ -161,52 +161,51 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/mpeg"></audio>""", height=0)
 
-    # --- FIX: DIE UNZERSTÖRBARE 2-SPALTEN-MATRIX (KOMPLETT UNABHÄNGIG VERBUNDEN) ---
-    col1, col2 = st.columns(2)
+    # --- REPARATUR: UNZERSTÖRBARES LAYOUT OHNE VERWIRRENDE WITH-BLÖCKE ---
+    col_links, col_rechts = st.columns(2)
     
-    # LINKER BLOCK (GEWINNER + FAVORITEN + CHART)
-    with col1:
-        st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
-        st.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
+    # Linke Seite aufbauen
+    col_links.markdown(f"### 🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
+    col_links.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
+    
+    col_links.markdown("---")
+    col_links.markdown("### 📋 Meine persönlichen Krypto-Favoriten")
+    if not favoriten_df.empty:
+        col_links.dataframe(favoriten_df[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
+    else:
+        col_links.info("💡 Deine Liste ist aktuell leer. Füge links Wunsch-Coins hinzu!")
         
-        st.markdown("---")
-        st.subheader("📋 Meine persönlichen Krypto-Favoriten")
-        if not favoriten_df.empty:
-            st.dataframe(favoriten_df[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
-        else:
-            st.info("💡 Deine Liste ist aktuell leer. Füge links Wunsch-Coins hinzu!")
-            
-        st.markdown("---")
-        st.subheader("📊 Live-Chartstation")
-        chart_liste = list(global_df["Ticker"].unique())
-        ausgewaehlter_coin = st.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
-        st.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
+    col_links.markdown("---")
+    col_links.markdown("### 📊 Live-Chartstation")
+    chart_liste = list(global_df["Ticker"].unique())
+    ausgewaehlter_coin = col_links.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
+    col_links.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
+    
+    cdf = daten_laden(ausgewaehlter_coin, gewaehlte_periode, gewaehltes_intervall)
+    if cdf is not None and len(cdf) >= 2:
+        cdf = indikatoren_berechnen(cdf)
         
-        cdf = daten_laden(ausgewaehlter_coin, gewaehlte_periode, gewaehltes_intervall)
-        if cdf is not None and len(cdf) >= 2:
-            cdf = indikatoren_berechnen(cdf)
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
+        fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
+        fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
+        
+        coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
+        if not coin_row.empty:
+            try:
+                c_pr = float(coin_row["raw_pr"].iloc[0])
+                c_atr = float(coin_row["raw_atr"].iloc[0])
+                c_sma = float(coin_row["raw_sma"].iloc[0])
+                sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+                tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
+                fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
+                fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
+                fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
+            except:
+                pass
             
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
-            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
-            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
-            
-            coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
-            if not coin_row.empty:
-                try:
-                    c_pr = float(coin_row["raw_pr"].iloc[0])
-                    c_atr = float(coin_row["raw_atr"].iloc[0])
-                    c_sma = float(coin_row["raw_sma"].iloc[0])
-                    sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
-                    tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
-                    fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
-                    fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
-                    fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
-                except:
-                    pass
-                
-            fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False, height=250, margin=dict(l=5, r=5, t=5, b=5), dragmode="pan")
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+        fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False, height=250, margin=dict(l=5, r=5, t=5, b=5), dragmode="pan")
+        col_links.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-    # RECHTER BLOCK (VERLIERER + LIVE-EINSTIEG)
-    with col2:
+    # Rechte Seite aufbauen
+    col_rechts.markdown(f"### 🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
