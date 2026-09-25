@@ -173,14 +173,14 @@ if daten_liste:
                     fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
                 except: pass
             
-            # Hier haben wir den lästigen Rangeslider komplett entfernt und flüssiges Mausrad-Scrollen aktiviert
             fig.update_layout(
                 template="plotly_dark", 
                 paper_bgcolor="#181A20", 
                 plot_bgcolor="#181A20",
-                xaxis=dict(rangeslider=dict(visible=False))
+                xaxis=dict(rangeslider=dict(visible=False)),
+                dragmode="zoom"
             )
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'modeBarButtonsToRemove': []})
 
     with col_rechts:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
