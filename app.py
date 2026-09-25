@@ -1,1489 +1,165 @@
-import streamlit as st
+# -*- coding: utf-8 -*-
+import os, random, time
 import pandas as pd
 import numpy as np
-import requests
+import streamlit as st
+import yfinance as yf
 import plotly.graph_objects as go
-import time
-import uuid
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
-st.set_page_config(page_title="Krypto Monitoring Terminal", page_icon="⚡", layout="wide")
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 🔑 SECRETS (in Streamlit Cloud unter "Secrets" eintragen, NICHT im Code) ---
-BIN_ID = st.secrets["JSONBIN_BIN_ID"]
-API_KEY = st.secrets["JSONBIN_API_KEY"]
+st.set_page_config(page_title="KRIPTO RADAR V9", page_icon="📊", layout="wide")
 
-# --- 🌐 DATENQUELLE: CoinGecko (Portfolio, Handelssitzungen, Top Bewegungen) ---
-# Wichtig: NICHT Binance, weil Binance Anfragen von Cloud-Servern (AWS/GCP) blockiert -
-# dasträfe sowohl Streamlit Cloud als auch GitHub Actions. CoinGecko blockiert das nicht.
-COINGECKO_BASIS = "https://api.coingecko.com/api/v3"
+st.markdown("""
+    <html lang="de" class="notranslate" translate="no">
+    <head><meta name="google" content="notranslate" /></head>
+    </html>
+    <style>
+    .stApp { background-color: #0B0E11; color: #EAECEF; }
+    h1, h2, h3, h4 { color: #EAECEF !important; margin-bottom: 2px !important; margin-top: 5px !important; }
+    div[data-testid="stDataFrame"] > div { max-height: none !important; height: 350px !important; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# Angenommene Round-Trip-Kosten (Börsengebühr + Slippage) - macht Backtest/Vorwärts-
-# Tracking realistischer statt mit 0% Kosten zu rechnen. Grobe, gängige Schätzung,
-# reale Kosten hängen von Börse/Coin/Ordergröße ab.
-GEBUEHREN_PROZENT = 0.2
+if "meine_favoriten" not in st.session_state:
+    st.session_state.meine_favoriten = ["BTC", "ETH"]
 
+st.title("📊 KRIPTO SWING RADAR V9 – PRO TRADER TERMINAL")
 
-def stichproben_label(anzahl):
-    """Kennzeichnet, wie viel Gewicht eine Backtest-Zahl statistisch verdient."""
-    if anzahl < 10:
-        return f"⚠️ Geringe Stichprobe (n={anzahl})"
-    elif anzahl < 30:
-        return f"🟡 Mittlere Stichprobe (n={anzahl})"
-    else:
-        return f"✅ Solide Basis (n={anzahl})"
-JSONBIN_BASIS = "https://api.jsonbin.io/v3/b"
+st.sidebar.header("⚙️ Einstellungen")
+interval_auswahl = st.sidebar.selectbox(
+    "⏱️ Wähle die Trading-Zeiteinheit:",
+    ["1 Minute", "5 Minuten", "15 Minuten", "1 Stunde", "4 Stunden", "1 Tag"],
+    index=5
+)
 
-TICKER_ZU_ID = {
-    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
-    "XRP": "ripple", "ADA": "cardano", "LINK": "chainlink",
-    "PAXG": "pax-gold",
-}
+yf_perioden = {"1 Minute": "1d", "5 Minuten": "5d", "15 Minuten": "7d", "1 Stunde": "30d", "4 Stunden": "30d", "1 Tag": "300d"}
+yf_intervalle = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
+gewaehlte_periode = yf_perioden[interval_auswahl]
+gewaehltes_intervall = yf_intervalle[interval_auswahl]
 
-# --- 🌐 DATENQUELLE: CryptoCompare (Beobachtung-Tab - Kerzen/Chart/Signale) ---
-# Liefert echte Minuten-/Stunden-Kerzen (Binance kann das aus der Cloud nicht, s.o.;
-# CoinGecko nur tageweise Granularität). CryptoCompare blockiert Cloud-Server nicht.
-CRYPTOCOMPARE_BASIS = "https://min-api.cryptocompare.com/data/v2"
-CRYPTOCOMPARE_API_KEY = st.secrets.get("CRYPTOCOMPARE_API_KEY", "")
+st.sidebar.markdown("---")
+st.sidebar.subheader("➕ Coin hinzufügen")
+neuer_coin = st.sidebar.text_input("Kryptokürzel eingeben (z.B. SOL, PEPE):", key="favoriten_input").upper().strip()
+if st.sidebar.button("Coin der Liste hinzufügen"):
+    if neuer_coin and neuer_coin not in st.session_state.meine_favoriten:
+        st.session_state.meine_favoriten.append(neuer_coin)
+        st.rerun()
+if st.sidebar.button("🗑️ Liste zurücksetzen"):
+    st.session_state.meine_favoriten = ["BTC", "ETH"]
+    st.rerun()
 
-TIMEFRAME_OPTIONEN = {
-    "⏱️ 5 Min": ("histominute", 5),
-    "⏱️ 15 Min": ("histominute", 15),
-    "🕐 1 Stunde": ("histohour", 1),
-    "🛑 4 Stunden": ("histohour", 4),
-    "📅 1 Tag": ("histoday", 1),
-}
+st.sidebar.markdown("---")
+st.sidebar.markdown(" Währung: **USD ($)**")
 
-ALARM_TYP_ANZEIGE = {
-    "preis_ueber": "Preis über",
-    "preis_unter": "Preis unter",
-    "rsi_ueber": "RSI über",
-    "rsi_unter": "RSI unter",
-}
-
-# --- 🌍 HANDELSSITZUNGEN ---
-# Gängige, häufig verwendete Richtwerte - keine offiziell regulierten Öffnungszeiten
-# (Krypto und Gold-Token wie PAXG handeln durchgehend). Wichtig für Volatilität,
-# NICHT für die Richtung (hoch/runter) - siehe Hinweis im entsprechenden Reiter.
-SITZUNGEN = {
-    "🌏 Asien (Tokio)": {"start_utc": 0, "ende_utc": 9},
-    "🇬🇧 Europa (London)": {"start_utc": 8, "ende_utc": 17},
-    "🇺🇸 Amerika (New York)": {"start_utc": 13, "ende_utc": 22},
-}
-LOKALE_ZEITZONE = "Europe/Vienna"
-
-# --- 📈 AKTIEN (Finnhub) ---
-# Wichtig: Finnhub gibt auf dem kostenlosen Plan keine historischen Kerzen für
-# Aktien frei (getestet: "error" bei /stock/candle) - deshalb hier nur der
-# Live-Snapshot über /quote, keine Indikatoren/Signale wie bei Krypto/Gold.
-FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "")
-FINNHUB_BASIS = "https://finnhub.io/api/v1"
-AKTIEN_TICKER = ["AAPL", "NVDA", "TSLA"]
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def finnhub_quote_holen(symbol: str):
-    if not FINNHUB_API_KEY:
-        return None
+@st.cache_data(ttl=5)
+def daten_laden(ticker, periode, intervall):
     try:
-        r = requests.get(f"{FINNHUB_BASIS}/quote", params={"symbol": symbol, "token": FINNHUB_API_KEY}, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException:
-        return None
-
-
-def aktien_snapshot_auswerten(quote):
-    if not quote or quote.get("c") in (None, 0):
-        return None
-    preis = quote["c"]
-    pc = quote.get("pc") or 0
-    o = quote.get("o") or 0
-    alter_stunden = None
-    zeitstempel = quote.get("t")
-    if zeitstempel:
-        letzte_aktualisierung = datetime.fromtimestamp(zeitstempel, tz=timezone.utc)
-        alter_stunden = (datetime.now(timezone.utc) - letzte_aktualisierung).total_seconds() / 3600
-    return {
-        "preis": preis,
-        "veraenderung_tag": (preis - pc) / pc * 100 if pc else None,
-        "veraenderung_seit_open": (preis - o) / o * 100 if o else None,
-        "alter_stunden": alter_stunden,
-    }
-
-
-def sitzungs_status():
-    jetzt_utc = datetime.now(timezone.utc)
-    stunde_utc = jetzt_utc.hour
-    ergebnisse = []
-    for name, zeiten in SITZUNGEN.items():
-        start, ende = zeiten["start_utc"], zeiten["ende_utc"]
-        offen = start <= stunde_utc < ende
-        ergebnisse.append({"name": name, "start_utc": start, "ende_utc": ende, "offen": offen})
-    return ergebnisse, jetzt_utc
-
-
-def utc_stunde_zu_lokal(utc_stunde, ziel_zone=LOKALE_ZEITZONE):
-    heute = datetime.now(timezone.utc).date()
-    utc_zeit = datetime(heute.year, heute.month, heute.day, utc_stunde % 24, 0, tzinfo=timezone.utc)
-    lokale_zeit = utc_zeit.astimezone(ZoneInfo(ziel_zone))
-    return lokale_zeit.strftime("%H:%M")
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def coingecko_preise_mit_zeit_holen(coingecko_id: str, tage: int = 90):
-    """Stündliche (bei days 2-90) Schlusskurse mit Zeitstempel - für die
-    Sitzungs-Statistik. Nur Nahepreis, keine echten OHLC-Kerzen nötig."""
-    try:
-        r = requests.get(
-            f"{COINGECKO_BASIS}/coins/{coingecko_id}/market_chart",
-            params={"vs_currency": "usd", "days": tage}, timeout=15,
-        )
-        r.raise_for_status()
-        return r.json().get("prices", [])
-    except requests.RequestException:
-        return []
-
-
-def stunden_analyse(punkte, vorschau_stunden=2):
-    """Für jede der 24 UTC-Stunden: historische Ø-%-Veränderung X Stunden später.
-    Reine Vergangenheitsstatistik, keine Vorhersage - Grundlage für die grafische
-    24h-Übersicht (ersetzt die einzelnen Sitzungs-Expander durch EIN Bild)."""
-    if len(punkte) < 50:
-        return {"grund": "keine_daten"}
-    zeiten = [datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc) for p in punkte]
-    preise = [p[1] for p in punkte]
-    veraenderungen_je_stunde = {h: [] for h in range(24)}
-    for i in range(len(punkte) - vorschau_stunden):
-        stunde = zeiten[i].hour
-        veraenderung = (preise[i + vorschau_stunden] - preise[i]) / preise[i] * 100
-        veraenderungen_je_stunde[stunde].append(veraenderung)
-    stunden_werte = {}
-    for h, werte in veraenderungen_je_stunde.items():
-        if len(werte) >= 5:
-            stunden_werte[h] = {
-                "durchschnitt": sum(werte) / len(werte),
-                "anzahl": len(werte),
-                "prozent_positiv": sum(1 for w in werte if w > 0) / len(werte) * 100,
-            }
-    if not stunden_werte:
-        return {"grund": "zu_wenig_pro_stunde"}
-    return {"grund": "ok", "stunden": stunden_werte}
-
-
-def london_zeit_zu_utc_stunde(stunde, minute=0):
-    """Wandelt eine Uhrzeit in Londoner Ortszeit (z.B. LBMA-Gold-Fixierung) in
-    die aktuelle UTC-Stunde um - berücksichtigt automatisch Sommer-/Winterzeit."""
-    heute = datetime.now(timezone.utc).date()
-    london_zeit = datetime(heute.year, heute.month, heute.day, stunde, minute, tzinfo=ZoneInfo("Europe/London"))
-    return london_zeit.astimezone(timezone.utc).hour
-
-
-def stunden_chart(ergebnis, ziel_zone=LOKALE_ZEITZONE):
-    zeilen = []
-    for utc_stunde, werte in ergebnis.items():
-        zeilen.append({"utc_stunde": utc_stunde, "lokal": utc_stunde_zu_lokal(utc_stunde, ziel_zone), **werte})
-    zeilen.sort(key=lambda z: z["lokal"])
-    x = [z["lokal"] for z in zeilen]
-    y = [z["durchschnitt"] for z in zeilen]
-    farben = ["#10b981" if v >= 0 else "#ef4444" for v in y]
-    fig = go.Figure(go.Bar(
-        x=x, y=y, marker_color=farben,
-        text=[f"{v:+.2f}%" for v in y], textposition="outside",
-        hovertext=[f"{z['anzahl']}× vorgekommen, {z['prozent_positiv']:.0f}% davon positiv" for z in zeilen],
-    ))
-    fig.update_layout(
-        height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark",
-        yaxis_title="Ø Veränderung (%)", xaxis_title="Uhrzeit (deine Zeit)",
-    )
-    return fig
-
-
-# --- 💾 PERSISTENTER SPEICHER (JSONBin – überlebt Neustarts & Neuladen) ---
-
-def zustand_laden():
-    try:
-        r = requests.get(f"{JSONBIN_BASIS}/{BIN_ID}/latest", headers={"X-Master-Key": API_KEY}, timeout=10)
-        r.raise_for_status()
-        record = r.json().get("record", {})
-        record.setdefault("watchlist", ["BTC", "ETH", "SOL"])
-        record.setdefault("portfolio", [])
-        record.setdefault("alerts", [])
-        record.setdefault("hypo_trades", {"offen": [], "geschlossen": []})
-        record.setdefault("portfolio_verlauf", [])
-        if "PAXG" not in record["watchlist"]:
-            record["watchlist"].append("PAXG")
-            try:
-                requests.put(
-                    f"{JSONBIN_BASIS}/{BIN_ID}", json=record,
-                    headers={"X-Master-Key": API_KEY, "Content-Type": "application/json"}, timeout=10,
-                )
-            except requests.RequestException:
-                pass
-        return record
-    except requests.RequestException:
-        st.warning("Persistenter Speicher aktuell nicht erreichbar – Änderungen werden evtl. nicht gespeichert.")
-        return {"watchlist": ["BTC", "ETH", "SOL", "PAXG"], "portfolio": [], "alerts": []}
-
-
-def zustand_speichern():
-    try:
-        r = requests.put(
-            f"{JSONBIN_BASIS}/{BIN_ID}",
-            json=st.session_state.zustand,
-            headers={"X-Master-Key": API_KEY, "Content-Type": "application/json"},
-            timeout=10,
-        )
-        r.raise_for_status()
-    except requests.RequestException:
-        st.warning("Speichern fehlgeschlagen – bitte gleich nochmal versuchen.")
-
-
-if "zustand" not in st.session_state:
-    st.session_state.zustand = zustand_laden()
-
-
-# --- 🌐 COINGECKO MARKTDATEN ---
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def coingecko_id_ermitteln(ticker: str):
-    if ticker in TICKER_ZU_ID:
-        return TICKER_ZU_ID[ticker]
-    try:
-        r = requests.get(f"{COINGECKO_BASIS}/search", params={"query": ticker}, timeout=10)
-        r.raise_for_status()
-        for coin in r.json().get("coins", []):
-            if coin.get("symbol", "").upper() == ticker:
-                return coin["id"]
-    except requests.RequestException:
-        pass
+        df = yf.Ticker(f"{ticker.upper()}-USD").history(period=periode, interval=intervall)
+        if not df.empty and len(df) >= 3: return df[['Open', 'High', 'Low', 'Close']].copy()
+    except: pass
     return None
 
+def indikatoren_berechnen(df):
+    anzahl_kerzen = len(df)
+    f_sma = 200 if anzahl_kerzen >= 200 else (20 if anzahl_kerzen >= 20 else anzahl_kerzen)
+    f_ema = 20 if anzahl_kerzen >= 20 else anzahl_kerzen
+    f_atr = 14 if anzahl_kerzen >= 14 else anzahl_kerzen
+    df['SMA_200'] = df['Close'].rolling(window=f_sma).mean().bfill()
+    df['EMA_20'] = df['Close'].ewm(span=f_ema, adjust=False).mean().bfill()
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(window=f_atr).mean().bfill()
+    return df
 
-@st.cache_data(ttl=900, show_spinner=False)
-def cryptocompare_ohlc_holen(ticker: str, endpoint: str, aggregate: int, limit: int = 300):
-    """Echte OHLC-Kerzen (inkl. Volumen) von CryptoCompare - liefert Minuten-,
-    Stunden- oder Tages-Granularität je nach endpoint/aggregate.
-    Gibt (DataFrame, Fehlermeldung) zurück - Fehlermeldung ist None bei Erfolg."""
-    if not CRYPTOCOMPARE_API_KEY:
-        return None, "Kein CryptoCompare-Key in den Secrets gesetzt."
-    try:
-        r = requests.get(
-            f"{CRYPTOCOMPARE_BASIS}/{endpoint}",
-            params={
-                "fsym": ticker, "tsym": "USD", "aggregate": aggregate,
-                "limit": limit, "api_key": CRYPTOCOMPARE_API_KEY,
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-        antwort = r.json()
-        if antwort.get("Response") != "Success":
-            return None, f"CryptoCompare-Fehler: {antwort.get('Message', 'unbekannt')}"
-        rohdaten = antwort.get("Data", {}).get("Data", [])
-    except requests.RequestException as e:
-        return None, f"Netzwerk-/HTTP-Fehler: {e}"
-    if not rohdaten:
-        return None, "Antwort enthielt keine Kursdaten."
-    df = pd.DataFrame(rohdaten)
-    if "close" not in df.columns:
-        return None, "Unerwartetes Antwortformat (keine 'close'-Spalte)."
-    df = df[df["close"] > 0].reset_index(drop=True)  # CryptoCompare füllt fehlende Perioden manchmal mit Nullzeilen
-    if df.empty or len(df) < 20:
-        return None, f"Nur {len(df)} gültige Datenpunkte (von {len(rohdaten)} erhaltenen) – zu wenig."
-    df["zeit"] = pd.to_datetime(df["time"], unit="s")
-    df = df.rename(columns={"volumeto": "volumen"})
-    return df[["zeit", "open", "high", "low", "close", "volumen"]], None
+basis_tickers = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOT", "LINK", "DOGE", "SHIB", "AVAX", "NEAR", "LTC", "PEPE", "SUI"]
+alle_aktiven_tickers = list(set(basis_tickers + st.session_state.meine_favoriten))
 
-
-def cryptocompare_symbol_gueltig(ticker: str) -> bool:
-    df, _ = cryptocompare_ohlc_holen(ticker, "histoday", 1, limit=10)
-    return df is not None and not df.empty
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def aktuellen_preis_holen(coingecko_id: str):
-    try:
-        r = requests.get(
-            f"{COINGECKO_BASIS}/simple/price",
-            params={"ids": coingecko_id, "vs_currencies": "usd"}, timeout=10,
-        )
-        r.raise_for_status()
-        return r.json().get(coingecko_id, {}).get("usd")
-    except (requests.RequestException, KeyError, ValueError):
-        return None
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fear_greed_index_holen():
-    try:
-        r = requests.get("https://api.alternative.me/fng/", timeout=10)
-        r.raise_for_status()
-        eintrag = r.json()["data"][0]
-        return int(eintrag["value"]), eintrag["value_classification"]
-    except (requests.RequestException, KeyError, IndexError):
-        return None, None
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def coingecko_markt_uebersicht(seiten: int = 2):
-    """Viele Coins mit 1h/24h-%-Veränderung für die Top-Bewegungen-Übersicht.
-    Scannt die Top (seiten×250) Coins nach Marktkapitalisierung."""
-    alle = []
-    for seite in range(1, seiten + 1):
-        try:
-            r = requests.get(
-                f"{COINGECKO_BASIS}/coins/markets",
-                params={
-                    "vs_currency": "usd", "order": "market_cap_desc",
-                    "per_page": 250, "page": seite,
-                    "price_change_percentage": "1h,24h", "sparkline": "false",
-                },
-                timeout=15,
-            )
-            r.raise_for_status()
-            daten = r.json()
-            if not daten:
-                break
-            alle.extend(daten)
-        except requests.RequestException:
-            break
-    return alle
-
-
-MEME_COIN_IDS = {
-    "DOGE": "dogecoin", "SHIB": "shiba-inu", "PEPE": "pepe",
-    "BONK": "bonk", "FLOKI": "floki", "WIF": "dogwifcoin",
-}
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def coingecko_meme_coins_holen():
-    """Kuratierte Liste eindeutiger, bekannter Meme-Coins (statt CoinGeckos teils
-    ungenauer 'meme-token'-Kategorie, die auch Nicht-Meme-Projekte enthalten kann)."""
-    ids = ",".join(MEME_COIN_IDS.values())
-    try:
-        r = requests.get(
-            f"{COINGECKO_BASIS}/coins/markets",
-            params={
-                "vs_currency": "usd", "ids": ids,
-                "order": "market_cap_desc", "per_page": 250, "page": 1,
-                "price_change_percentage": "1h,24h", "sparkline": "false",
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException:
-        return []
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def status_pruefen():
-    """Leichte Erreichbarkeits-Checks der verwendeten Datenquellen. Nutzt möglichst
-    minimale Anfragen, um selbst kein nennenswertes Kontingent zu verbrauchen."""
-    ergebnisse = {}
-
-    df, fehler = cryptocompare_ohlc_holen("BTC", "histoday", 1, limit=2)
-    ergebnisse["CryptoCompare"] = (df is not None, fehler)
-
-    try:
-        r = requests.get(f"{COINGECKO_BASIS}/ping", timeout=10)
-        ergebnisse["CoinGecko"] = (r.status_code == 200, None if r.status_code == 200 else f"HTTP {r.status_code}")
-    except requests.RequestException as e:
-        ergebnisse["CoinGecko"] = (False, str(e))
-
-    if FINNHUB_API_KEY:
-        quote = finnhub_quote_holen("AAPL")
-        ok = bool(quote and quote.get("c") not in (None, 0))
-        ergebnisse["Finnhub"] = (ok, None if ok else "Keine gültige Antwort")
+daten_liste = []
+for t in alle_aktiven_tickers:
+    raw_df = daten_laden(t, gewaehlte_periode, gewaehltes_intervall)
+    if raw_df is None or len(raw_df) < 2: continue
+    df = indikatoren_berechnen(raw_df.copy())
+    pr = df['Close'].iloc[-1]
+    sma = df['SMA_200'].iloc[-1]
+    ema = df['EMA_20'].iloc[-1]
+    vor_close = df['Close'].iloc[-2]
+    vor_ema = df['EMA_20'].iloc[-2]
+    chg = ((pr - vor_close) / vor_close) * 100.0
+    atr = df['ATR'].iloc[-1] if df['ATR'].iloc[-1] != 0 else pr * 0.02
+    if pr > sma:
+        sig_txt = "🚀 EINSTEIGEN LONG" if (vor_close <= vor_ema and pr > ema) else "⏳ ABGEFAHREN"
     else:
-        ergebnisse["Finnhub"] = (None, "Kein Key in den Secrets gesetzt")
-
-    try:
-        r = requests.get(f"{JSONBIN_BASIS}/{BIN_ID}/latest", headers={"X-Master-Key": API_KEY}, timeout=10)
-        ergebnisse["JSONBin (Speicher)"] = (r.status_code == 200, None if r.status_code == 200 else f"HTTP {r.status_code}")
-    except requests.RequestException as e:
-        ergebnisse["JSONBin (Speicher)"] = (False, str(e))
-
-    return ergebnisse
-
-
-def top_bewegungen(marktdaten, zeitraum="24h", schwelle=10.0, anzahl=10):
-    """Filtert Coins nach %-Veränderung und trennt in Gewinner/Verlierer."""
-    feld = "price_change_percentage_1h_in_currency" if zeitraum == "1h" else "price_change_percentage_24h_in_currency"
-    gewinner, verlierer = [], []
-    for coin in marktdaten:
-        veraenderung = coin.get(feld)
-        if veraenderung is None:
-            continue
-        eintrag = {
-            "id": coin.get("id"),
-            "symbol": coin.get("symbol", "").upper(),
-            "name": coin.get("name"),
-            "preis": coin.get("current_price"),
-            "veraenderung": veraenderung,
-        }
-        if veraenderung >= schwelle:
-            gewinner.append(eintrag)
-        elif veraenderung <= -schwelle:
-            verlierer.append(eintrag)
-    gewinner.sort(key=lambda k: k["veraenderung"], reverse=True)
-    verlierer.sort(key=lambda k: k["veraenderung"])
-    return gewinner[:anzahl], verlierer[:anzahl]
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def richtungs_wahrscheinlichkeit(coingecko_id: str, aktuelle_veraenderung: float, vorschau_perioden: int = 1):
-    """Schaut in der EIGENEN Historie dieses Coins: Nach ähnlich starken Bewegungen
-    (gleiche Richtung wie jetzt) - ging es typischerweise weiter in die gleiche
-    Richtung, oder hat sich das Blatt eher gewendet? Reine Vergangenheitsstatistik,
-    keine Vorhersage - die %-Zahl ist eine historische Tendenz, keine Garantie."""
-    punkte = coingecko_preise_mit_zeit_holen(coingecko_id, tage=90)
-    if len(punkte) < 30:
-        return None
-    preise = [p[1] for p in punkte]
-    veraenderungen = [(preise[i] - preise[i - 1]) / preise[i - 1] * 100 for i in range(1, len(preise))]
-    schwelle = max(abs(aktuelle_veraenderung) * 0.5, 0.5)
-    richtung_positiv = aktuelle_veraenderung > 0
-    treffer = []
-    for i in range(len(veraenderungen) - vorschau_perioden - 1):
-        v = veraenderungen[i]
-        if (v > 0) == richtung_positiv and abs(v) >= schwelle:
-            folge_index = i + vorschau_perioden
-            folge_veraenderung = (preise[folge_index + 1] - preise[folge_index]) / preise[folge_index] * 100
-            treffer.append(folge_veraenderung)
-    if len(treffer) < 5:
-        return None
-    weiter_prozent = sum(1 for t in treffer if (t > 0) == richtung_positiv) / len(treffer) * 100
-    return {"anzahl": len(treffer), "weiter_prozent": weiter_prozent, "richtung_positiv": richtung_positiv}
-
-
-# --- 📐 INDIKATOREN ALS VOLLSTÄNDIGE ZEITREIHEN (für aktuelle Anzeige UND Backtest) ---
-
-def indikator_serien_berechnen(closes, highs, lows):
-    s = pd.Series(closes)
-    h = pd.Series(highs)
-    l = pd.Series(lows)
-
-    delta = s.diff()
-    gewinn = delta.clip(lower=0).rolling(14).mean()
-    verlust = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gewinn / verlust.replace(0, 1e-9)
-    rsi_serie = 100 - (100 / (1 + rs))
-
-    ema12 = s.ewm(span=12, adjust=False).mean()
-    ema26 = s.ewm(span=26, adjust=False).mean()
-    macd_serie = ema12 - ema26
-    signal_serie = macd_serie.ewm(span=9, adjust=False).mean()
-
-    bb_mittel = s.rolling(20).mean()
-    bb_std = s.rolling(20).std()
-    bb_oben = bb_mittel + 2 * bb_std
-    bb_unten = bb_mittel - 2 * bb_std
-
-    tief_14 = l.rolling(14).min()
-    hoch_14 = h.rolling(14).max()
-    stoch_k = 100 * (s - tief_14) / (hoch_14 - tief_14).replace(0, 1e-9)
-    stoch_d = stoch_k.rolling(3).mean()
-
-    sma_trend = s.rolling(50).mean()
-
-    prev_close = s.shift(1)
-    prev_high = h.shift(1)
-    prev_low = l.shift(1)
-    tr = pd.concat([h - l, (h - prev_close).abs(), (l - prev_close).abs()], axis=1).max(axis=1)
-    plus_dm_raw = h - prev_high
-    minus_dm_raw = prev_low - l
-    plus_dm = pd.Series(np.where((plus_dm_raw > minus_dm_raw) & (plus_dm_raw > 0), plus_dm_raw, 0), index=s.index)
-    minus_dm = pd.Series(np.where((minus_dm_raw > plus_dm_raw) & (minus_dm_raw > 0), minus_dm_raw, 0), index=s.index)
-    tr_glatt = tr.ewm(alpha=1 / 14, adjust=False).mean()
-    plus_dm_glatt = plus_dm.ewm(alpha=1 / 14, adjust=False).mean()
-    minus_dm_glatt = minus_dm.ewm(alpha=1 / 14, adjust=False).mean()
-    plus_di = 100 * plus_dm_glatt / tr_glatt.replace(0, 1e-9)
-    minus_di = 100 * minus_dm_glatt / tr_glatt.replace(0, 1e-9)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
-    adx_serie = dx.ewm(alpha=1 / 14, adjust=False).mean()
-
-    return {
-        "rsi": rsi_serie, "macd": macd_serie, "signal": signal_serie,
-        "bb_mittel": bb_mittel, "bb_oben": bb_oben, "bb_unten": bb_unten,
-        "stoch_k": stoch_k, "stoch_d": stoch_d, "sma_trend": sma_trend, "adx": adx_serie,
-    }
-
-
-def score_bei_index(serien, closes, highs, lows, i):
-    """Kombiniert 5 Indikatoren zu einem Score (-5 bis +5) und liefert die Gründe
-    in Klartext. Rein beschreibend, was die Indikatoren JETZT zeigen -
-    keine Vorhersage und keine Handlungsempfehlung."""
-    preis = closes[i]
-    rsi_wert = serien["rsi"].iloc[i]
-    macd_wert = serien["macd"].iloc[i]
-    signal_wert = serien["signal"].iloc[i]
-    bb_oben = serien["bb_oben"].iloc[i]
-    bb_unten = serien["bb_unten"].iloc[i]
-    stoch_k = serien["stoch_k"].iloc[i]
-    trend = serien["sma_trend"].iloc[i]
-    adx_wert = serien["adx"].iloc[i]
-
-    score = 0
-    gruende = []
-    if pd.notna(rsi_wert):
-        if rsi_wert < 32:
-            score += 1; gruende.append(f"RSI überverkauft ({rsi_wert:.0f})")
-        elif rsi_wert > 70:
-            score -= 1; gruende.append(f"RSI überkauft ({rsi_wert:.0f})")
-    if pd.notna(macd_wert) and pd.notna(signal_wert):
-        if macd_wert > signal_wert:
-            score += 1; gruende.append("MACD über Signallinie")
-        else:
-            score -= 1; gruende.append("MACD unter Signallinie")
-    if pd.notna(bb_oben) and pd.notna(bb_unten):
-        if preis < bb_unten:
-            score += 1; gruende.append("Preis unter unterem Bollinger-Band")
-        elif preis > bb_oben:
-            score -= 1; gruende.append("Preis über oberem Bollinger-Band")
-    if pd.notna(stoch_k):
-        if stoch_k < 20:
-            score += 1; gruende.append(f"Stochastik überverkauft ({stoch_k:.0f})")
-        elif stoch_k > 80:
-            score -= 1; gruende.append(f"Stochastik überkauft ({stoch_k:.0f})")
-    if pd.notna(trend):
-        if preis > trend:
-            score += 1; gruende.append("Preis über Trend-SMA(50)")
-        else:
-            score -= 1; gruende.append("Preis unter Trend-SMA(50)")
-
-    if score >= 3:
-        kategorie = "Stark bullisch"
-    elif score >= 1:
-        kategorie = "Leicht bullisch"
-    elif score <= -3:
-        kategorie = "Stark bärisch"
-    elif score <= -1:
-        kategorie = "Leicht bärisch"
-    else:
-        kategorie = "Neutral"
-
-    trend_stark = bool(pd.notna(adx_wert) and adx_wert > 25)
-    return score, kategorie, gruende, trend_stark, (float(adx_wert) if pd.notna(adx_wert) else None)
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def backtest_kategorie(closes, highs, lows, ziel_kategorie, vorschau=5):
-    """Sucht in der Historie nach Momenten mit der GLEICHEN Signal-Kategorie und
-    zeigt, wie sich der Kurs danach tatsächlich entwickelt hat. Echte historische
-    Zahlen statt eines Versprechens - Vergangenheit ist keine Garantie für die Zukunft."""
-    serien = indikator_serien_berechnen(closes, highs, lows)
-    n = len(closes)
-    start = 50
-    ende = n - vorschau
-    if ende <= start:
-        return {"grund": "zu_kurzer_zeitraum"}
-    treffer = []
-    for i in range(start, ende):
-        _, kategorie, _, _, _ = score_bei_index(serien, closes, highs, lows, i)
-        if kategorie == ziel_kategorie:
-            veraenderung = (closes[i + vorschau] - closes[i]) / closes[i] * 100 - GEBUEHREN_PROZENT
-            treffer.append(veraenderung)
-    if len(treffer) < 5:
-        return {"grund": "zu_wenig_faelle", "anzahl": len(treffer)}
-    serie = pd.Series(treffer)
-    return {
-        "grund": "ok",
-        "anzahl": len(treffer),
-        "prozent_positiv": float((serie > 0).mean() * 100),
-        "durchschnitt": float(serie.mean()),
-        "schlechtester": float(serie.min()),
-        "bester": float(serie.max()),
-    }
-
-
-def bollinger_baender_serie(werte, periode=20, anzahl_std=2):
-    s = pd.Series(werte)
-    mittel = s.rolling(periode).mean()
-    std = s.rolling(periode).std()
-    return mittel, mittel + anzahl_std * std, mittel - anzahl_std * std
-
-
-def atr_wert(highs, lows, closes, periode=14):
-    """Aktueller ATR als absoluter Preis-Betrag (nicht Prozent) - für Stop/Ziel bei
-    hypothetischen Positionen im Vorwärts-Tracking."""
-    if len(closes) < periode + 1:
-        return None
-    h = pd.Series(highs)
-    l = pd.Series(lows)
-    c = pd.Series(closes)
-    prev_close = c.shift(1)
-    tr = pd.concat([h - l, (h - prev_close).abs(), (l - prev_close).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(periode).mean().iloc[-1]
-    return float(atr) if pd.notna(atr) else None
-
-
-def hypo_trades_aktualisieren(ticker, daten):
-    """Vorwärts-Tracking: protokolliert, was passiert wäre, wenn man jedem starken
-    Signal gefolgt wäre. Läuft nur, wenn die App offen ist (kein 24/7 wie die Alarme).
-    Ziel/Stop nach ATR, ähnlich der Logik aus dem Vergleichs-Tool des Kollegen."""
-    hypo = st.session_state.zustand.setdefault("hypo_trades", {"offen": [], "geschlossen": []})
-    veraendert = False
-    preis = daten["preis"]
-
-    for trade in [t for t in hypo["offen"] if t["ticker"] == ticker]:
-        ausgeloest = None
-        if trade["richtung"] == "long":
-            if preis >= trade["ziel"]:
-                ausgeloest = "Ziel erreicht"
-            elif preis <= trade["stop"]:
-                ausgeloest = "Stop erreicht"
-        else:
-            if preis <= trade["ziel"]:
-                ausgeloest = "Ziel erreicht"
-            elif preis >= trade["stop"]:
-                ausgeloest = "Stop erreicht"
-
-        eroeffnet = datetime.fromisoformat(trade["eroeffnet_am"])
-        if ausgeloest is None and (datetime.now(timezone.utc) - eroeffnet).days >= 30:
-            ausgeloest = "Zeit abgelaufen"
-
-        if ausgeloest:
-            veraenderung_pct = (
-                (preis - trade["einstieg"]) / trade["einstieg"] * 100 if trade["richtung"] == "long"
-                else (trade["einstieg"] - preis) / trade["einstieg"] * 100
-            ) - GEBUEHREN_PROZENT
-            hypo["geschlossen"].insert(0, {
-                **trade, "ausstieg": preis, "ergebnis": ausgeloest,
-                "veraenderung_pct": veraenderung_pct,
-                "geschlossen_am": datetime.now(timezone.utc).isoformat(),
-            })
-            hypo["geschlossen"] = hypo["geschlossen"][:50]
-            hypo["offen"] = [t for t in hypo["offen"] if t["id"] != trade["id"]]
-            veraendert = True
-
-    hat_offene = any(t["ticker"] == ticker for t in hypo["offen"])
-    if not hat_offene and daten["kategorie"] in ("Stark bullisch", "Stark bärisch"):
-        atr = atr_wert(daten["highs"], daten["lows"], daten["closes"])
-        if atr:
-            einstieg = daten["preis_signal"]
-            richtung = "long" if daten["kategorie"] == "Stark bullisch" else "short"
-            stop = einstieg - atr if richtung == "long" else einstieg + atr
-            ziel = einstieg + atr * 2 if richtung == "long" else einstieg - atr * 2
-            hypo["offen"].append({
-                "id": str(uuid.uuid4())[:8], "ticker": ticker, "richtung": richtung,
-                "einstieg": einstieg, "stop": stop, "ziel": ziel,
-                "eroeffnet_am": datetime.now(timezone.utc).isoformat(),
-            })
-            veraendert = True
-
-    if veraendert:
-        zustand_speichern()
-
-
-def portfolio_verlauf_aktualisieren(gesamt_wert):
-    """Trägt den aktuellen Portfolio-Gesamtwert in den Verlauf ein - höchstens
-    einmal pro Stunde, damit der Speicher nicht mit jedem Seitenaufruf wächst."""
-    verlauf = st.session_state.zustand.setdefault("portfolio_verlauf", [])
-    jetzt = datetime.now(timezone.utc)
-    if verlauf:
-        letzter_zeit = datetime.fromisoformat(verlauf[-1]["zeit"])
-        if (jetzt - letzter_zeit).total_seconds() < 3600:
-            return
-    verlauf.append({"zeit": jetzt.isoformat(), "wert": round(gesamt_wert, 2)})
-    st.session_state.zustand["portfolio_verlauf"] = verlauf[-200:]
-    zustand_speichern()
-
-
-def coin_daten_laden(ticker: str, intervall_label: str):
-    endpoint, aggregate = TIMEFRAME_OPTIONEN.get(intervall_label, ("histohour", 1))
-    df, fehler = cryptocompare_ohlc_holen(ticker, endpoint, aggregate)
-    if df is None or df.empty:
-        return None, (fehler or "Unbekannter Fehler.")
-
-    closes_chart = df["close"].tolist()
-    highs_chart = df["high"].tolist()
-    lows_chart = df["low"].tolist()
-    volumen_liste = df["volumen"].tolist()
-
-    bb_mittel_serie, bb_oben_serie, bb_unten_serie = bollinger_baender_serie(closes_chart)
-    df["bb_mittel"] = bb_mittel_serie.values
-    df["bb_oben"] = bb_oben_serie.values
-    df["bb_unten"] = bb_unten_serie.values
-
-    # Signale NUR aus abgeschlossenen Kerzen berechnen - die letzte Kerze läuft evtl.
-    # noch, sonst würde sich der Score bei jedem Neuladen "verflackern"
-    # (Praxis übernommen aus dem Vergleichs-Tool des Kollegen).
-    n_signal = len(closes_chart) - 1 if len(closes_chart) > 21 else len(closes_chart)
-    closes = closes_chart[:n_signal]
-    highs = highs_chart[:n_signal]
-    lows = lows_chart[:n_signal]
-
-    serien = indikator_serien_berechnen(closes, highs, lows)
-    letzter_index = len(closes) - 1
-    score, kategorie, gruende, trend_stark, adx_wert = score_bei_index(serien, closes, highs, lows, letzter_index)
-
-    return {
-        "df": df,
-        "preis": closes_chart[-1],
-        "preis_signal": closes[-1],
-        "rsi": serien["rsi"].iloc[-1] if pd.notna(serien["rsi"].iloc[-1]) else None,
-        "stoch_k": serien["stoch_k"].iloc[-1] if pd.notna(serien["stoch_k"].iloc[-1]) else None,
-        "adx": adx_wert,
-        "trend_stark": trend_stark,
-        "score": score,
-        "kategorie": kategorie,
-        "gruende": gruende,
-        "bb_oben": bb_oben_serie.iloc[-1] if len(bb_oben_serie) else None,
-        "bb_unten": bb_unten_serie.iloc[-1] if len(bb_unten_serie) else None,
-        "volumen_aktuell": volumen_liste[-1] if volumen_liste else None,
-        "volumen_schnitt": pd.Series(volumen_liste).rolling(min(20, max(len(volumen_liste) - 1, 1))).mean().iloc[-1] if volumen_liste else None,
-        "closes": closes, "highs": highs, "lows": lows,
-    }, None
-
-
-def candlestick_chart(df: pd.DataFrame, projektion=None, aktueller_preis=None, vorschau=5):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df["zeit"], open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="Kurs",
-    ))
-    fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_oben"], line=dict(width=1, color="rgba(150,150,255,0.5)"), name="BB oben"))
-    fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_unten"], line=dict(width=1, color="rgba(150,150,255,0.5)"), name="BB unten", fill="tonexty", fillcolor="rgba(150,150,255,0.07)"))
-    fig.add_trace(go.Scatter(x=df["zeit"], y=df["bb_mittel"], line=dict(width=1, dash="dot", color="orange"), name="BB Mitte"))
-
-    # Projektions-Zone: KEINE Ziel-Linie (das wäre eine Vorhersage), sondern eine
-    # Bandbreite aus dem historischen Backtest - beste/schlechteste Entwicklung nach
-    # ähnlichen Signalen in der Vergangenheit dieses Coins.
-    if projektion and projektion.get("grund") == "ok" and aktueller_preis and len(df) >= 2:
-        letzter_zeitpunkt = df["zeit"].iloc[-1]
-        delta = df["zeit"].iloc[-1] - df["zeit"].iloc[-2]
-        projektions_zeitpunkt = letzter_zeitpunkt + delta * vorschau
-
-        oben = aktueller_preis * (1 + projektion["bester"] / 100)
-        unten = aktueller_preis * (1 + projektion["schlechtester"] / 100)
-        mitte = aktueller_preis * (1 + projektion["durchschnitt"] / 100)
-
-        fig.add_shape(
-            type="rect", x0=letzter_zeitpunkt, x1=projektions_zeitpunkt,
-            y0=min(oben, unten), y1=max(oben, unten),
-            fillcolor="rgba(167,139,250,0.15)", line_width=0, layer="below",
-        )
-        fig.add_shape(
-            type="line", x0=letzter_zeitpunkt, x1=projektions_zeitpunkt, y0=mitte, y1=mitte,
-            line=dict(color="rgba(167,139,250,0.9)", dash="dot", width=1.5),
-        )
-        fig.add_annotation(
-            x=projektions_zeitpunkt, y=mitte, text=f"Ø {projektion['durchschnitt']:+.1f}%",
-            showarrow=False, font=dict(size=10, color="rgba(216,180,254,1)"), xanchor="left",
-        )
-
-    fig.update_layout(
-        height=420, margin=dict(l=10, r=10, t=10, b=10),
-        xaxis_rangeslider_visible=False, template="plotly_dark", showlegend=False,
-        dragmode="pan",
-    )
-    return fig
-
-
-# --- 🖥️ OBERFLÄCHE ---
-st.title("⚡ Krypto Monitoring Terminal (Live-Daten)")
-st.caption(
-    "Kerzen & Signale: CryptoCompare · Angst-&-Gier-Index: alternative.me · "
-    "Sitzungen/Portfolio/Top-Bewegungen: CoinGecko · "
-    "Nur Beobachtung – **keine automatische Order-Ausführung, keine Anlageberatung.** "
-    "Signale sind statistische Tendenzen aus der Vergangenheit, keine Garantie."
-)
-st.caption("Powered by CryptoCompare")
-
-tab_beobachtung, tab_portfolio, tab_alarme, tab_sitzungen, tab_bewegungen, tab_status = st.tabs(
-    ["📊 Beobachtung", "💰 Portfolio", "🔔 Alarme", "🌍 Handelssitzungen", "🔥 Top Bewegungen", "🩺 Status"]
-)
-
-# ============================== TAB 1: BEOBACHTUNG ==============================
-with tab_beobachtung:
-    st.subheader("➕ Neuen Coin beobachten")
-    c_eingabe, c_button = st.columns(2)
-    neuer_ticker = c_eingabe.text_input(
-        "Krypto-Kürzel eingeben:", placeholder="Z. B. XRP, ADA, LINK, PHA", key="add_input"
-    ).upper().strip()
-
-    if c_button.button("🪙 Coin hinzufügen", use_container_width=True, key="add_btn"):
-        watchlist = st.session_state.zustand["watchlist"]
-        if neuer_ticker in watchlist:
-            st.warning(f"{neuer_ticker} wird bereits beobachtet.")
-        elif cryptocompare_symbol_gueltig(neuer_ticker):
-            watchlist.append(neuer_ticker)
-            zustand_speichern()
-            st.success(f"{neuer_ticker} hinzugefügt.")
-            time.sleep(0.3)
-            st.rerun()
-        else:
-            st.error(f'Kein Coin mit Kürzel "{neuer_ticker}" bei CryptoCompare gefunden.')
-
-    st.markdown("---")
-    st.subheader("🧠 Krypto-Angst-&-Gier-Index")
-    fg_wert, fg_klasse = fear_greed_index_holen()
-    if fg_wert is None:
-        st.info("Angst-&-Gier-Index aktuell nicht abrufbar.")
-    else:
-        st.progress(fg_wert / 100)
-        st.markdown(f"**Index-Wert:** `{fg_wert}/100` | **Einstufung:** **{fg_klasse}**")
-
-    st.markdown("---")
-    if st.button("🔄 Daten neu laden", type="primary", use_container_width=True, key="scan_btn"):
-        cryptocompare_ohlc_holen.clear()
-        aktuellen_preis_holen.clear()
-        fear_greed_index_holen.clear()
-        backtest_kategorie.clear()
-        st.session_state.zustand = zustand_laden()
-        st.rerun()
-
-    st.markdown("---")
-    st.subheader("📊 Live-Kerzen, Signal-Score & Indikatoren")
-
-    watchlist = st.session_state.zustand["watchlist"]
-    optionen = list(TIMEFRAME_OPTIONEN.keys())
-
-    # Einmal alle Coins laden (Netzwerk-Aufrufe sind gecacht, kostet also keine
-    # zusätzlichen Anfragen) - Ergebnis wird für Übersicht + Hauptliste genutzt.
-    alle_ergebnisse = {}
-    for ticker in list(watchlist):
-        select_key = f"select_{ticker}"
-        if select_key in st.session_state and st.session_state[select_key] not in optionen:
-            del st.session_state[select_key]  # alte Auswahl aus vorheriger Zeitraum-Umstellung verwerfen
-        zeitraum_fuer_ticker = st.session_state.get(select_key, optionen[1])
-        with st.spinner(f"Lade {ticker}…"):
-            d, f = coin_daten_laden(ticker, zeitraum_fuer_ticker)
-        alle_ergebnisse[ticker] = (d, f, zeitraum_fuer_ticker)
-
-    erfolgreiche = {t: d for t, (d, f, zr) in alle_ergebnisse.items() if d}
-
-    if erfolgreiche:
-        bullisch_n = sum(1 for d in erfolgreiche.values() if "bullisch" in d["kategorie"])
-        baerisch_n = sum(1 for d in erfolgreiche.values() if "bärisch" in d["kategorie"])
-        neutral_n = len(erfolgreiche) - bullisch_n - baerisch_n
-        st.markdown(
-            f"**📋 Watchlist-Überblick:** 🟢 {bullisch_n} bullisch · 🟡 {neutral_n} neutral · 🔴 {baerisch_n} bärisch"
-        )
-
-        with st.expander("📊 Volatilitäts-Ranking (ATR) – unruhigste zuerst"):
-            rang_liste = []
-            for ticker, d in erfolgreiche.items():
-                atr_abs = atr_wert(d["highs"], d["lows"], d["closes"])
-                if atr_abs and d["preis"]:
-                    rang_liste.append({"Coin": ticker, "ATR (%)": round(atr_abs / d["preis"] * 100, 2)})
-            if rang_liste:
-                rang_liste.sort(key=lambda r: r["ATR (%)"], reverse=True)
-                st.dataframe(pd.DataFrame(rang_liste), use_container_width=True, hide_index=True)
-            else:
-                st.caption("Noch keine ausreichende Historie für ein ATR-Ranking.")
-
-        with st.expander("🏆 Gesamt-Erfolgsbilanz (Backtest + Vorwärts-Tracking, alle Coins)"):
-            st.caption(
-                "Ehrliche Gesamt-Einschätzung: Trifft das System bei deinen aktuellen Coins insgesamt "
-                "eher zu oder nicht? Reine Vergangenheitsstatistik, keine Garantie für die Zukunft."
-            )
-            gesamt_anzahl = 0
-            gewichtete_durchschnitt = 0.0
-            gewichtete_positiv = 0.0
-            for ticker, d in erfolgreiche.items():
-                bt = backtest_kategorie(tuple(d["closes"]), tuple(d["highs"]), tuple(d["lows"]), d["kategorie"], vorschau=5)
-                if bt.get("grund") == "ok":
-                    n = bt["anzahl"]
-                    gesamt_anzahl += n
-                    gewichtete_durchschnitt += n * bt["durchschnitt"]
-                    gewichtete_positiv += n * bt["prozent_positiv"]
-
-            st.markdown("**📊 Rückblickender Backtest** (aktuelle Signale aller Coins kombiniert):")
-            if gesamt_anzahl > 0:
-                st.write(
-                    f"Kurs höher in **{gewichtete_positiv / gesamt_anzahl:.0f}%** der {gesamt_anzahl} Fälle, "
-                    f"Ø **{gewichtete_durchschnitt / gesamt_anzahl:+.2f}%** (bereits um Gebühren bereinigt)"
-                )
-                st.caption(stichproben_label(gesamt_anzahl))
-            else:
-                st.info("Noch nicht genug Backtest-Daten über die Watchlist hinweg.")
-
-            hypo_bilanz = st.session_state.zustand.get("hypo_trades", {"offen": [], "geschlossen": []})
-            geschlossen_bilanz = hypo_bilanz.get("geschlossen", [])
-            st.markdown("**📈 Vorwärts-Tracking** (tatsächlich seitdem verfolgt):")
-            if geschlossen_bilanz:
-                ziel_n = sum(1 for t in geschlossen_bilanz if t["ergebnis"] == "Ziel erreicht")
-                stop_n = sum(1 for t in geschlossen_bilanz if t["ergebnis"] == "Stop erreicht")
-                avg = sum(t["veraenderung_pct"] for t in geschlossen_bilanz) / len(geschlossen_bilanz)
-                st.write(
-                    f"**{ziel_n}** Ziel / **{stop_n}** Stop von **{len(geschlossen_bilanz)}** geschlossenen "
-                    f"Positionen, Ø **{avg:+.2f}%**"
-                )
-                st.caption(stichproben_label(len(geschlossen_bilanz)))
-            else:
-                st.info("Noch keine geschlossenen Vorwärts-Tracking-Positionen.")
-
-    for ticker in list(watchlist):
-        daten, fehler, aktueller_zeitraum = alle_ergebnisse[ticker]
-
+        sig_txt = "📉 EINSTEIGEN SHORT" if (vor_close >= vor_ema and pr < ema) else "⏳ ABGEFAHREN"
+    daten_liste.append({"Ticker": t, "Preis ($)": round(pr, 4 if pr < 1 else 2), "Änderung (%)": round(chg, 2), "Trading Signal": sig_txt, "raw_pr": pr, "raw_atr": atr, "raw_sma": sma})
+
+if daten_liste:
+    global_df = pd.DataFrame(daten_liste)
+    basis_df = global_df[global_df["Ticker"].isin(basis_tickers)]
+    global_gewinner = basis_df.sort_values(by="Änderung (%)", ascending=False).head(10)
+    global_verlierer = basis_df.sort_values(by="Änderung (%)", ascending=True).head(10)
+    favoriten_df = global_df[global_df["Ticker"].isin(st.session_state.meine_favoriten)]
+    st_alarm_ausloesen = False
+    einstiegs_liste = []
+    for _, row in global_df.iterrows():
+        if "EINSTEIGEN" in row["Trading Signal"]:
+            c_pr, c_atr, c_sma = row["raw_pr"], row["raw_atr"], row["raw_sma"]
+            sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+            tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
+            st_alarm_ausloesen = True
+            einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": "🚀 LONG" if c_pr > c_sma else "📉 SHORT", "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
+
+    if st_alarm_ausloesen:
+        st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/wav"></audio>""", height=0)
+
+    col_links, col_rechts = st.columns(2)
+    with col_links:
+        st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
+        st.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         st.markdown("---")
-        if daten is None:
-            st.error(f"**{ticker}**: Keine Daten verfügbar – Grund: {fehler}")
-            continue
-
-        hypo_trades_aktualisieren(ticker, daten)
-
-        kategorie = daten["kategorie"]
-        score = daten["score"]
-        if kategorie.startswith("Stark bullisch") or kategorie.startswith("Leicht bullisch"):
-            ampel, ampel_text = "🟢", "Bullische Signale (Long-Tendenz)"
-        elif kategorie.startswith("Stark bärisch") or kategorie.startswith("Leicht bärisch"):
-            ampel, ampel_text = "🔴", "Bärische Signale (Short-Tendenz)"
+        st.subheader("📋 Meine persönlichen Krypto-Favoriten")
+        if not favoriten_df.empty:
+            st.dataframe(favoriten_df[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         else:
-            ampel, ampel_text = "🟡", "Neutral"
+            st.info("💡 Deine Liste ist aktuell leer.")
+        st.markdown("---")
+        st.subheader("📊 Live-Chartstation")
+        chart_liste = list(global_df["Ticker"].unique())
+        ausgewaehlter_coin = st.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
+        st.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
+        cdf = daten_laden(ausgewaehlter_coin, gewaehlte_periode, gewaehltes_intervall)
+        if cdf is not None and len(cdf) >= 2:
+            cdf = indikatoren_berechnen(cdf)
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
+            coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
+            if not coin_row.empty:
+                try:
+                    c_pr = float(coin_row["raw_pr"].values[0])
+                    c_atr = float(coin_row["raw_atr"].values[0])
+                    c_sma = float(coin_row["raw_sma"].values[0])
+                    sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+                    tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
+                    fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
+                    fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
+                    fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
+                except: pass
+            fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
 
-        c_ampel, c_info = st.columns([1, 5])
-        with c_ampel:
-            st.markdown(f"## {ampel}")
-        with c_info:
-            st.markdown(f"**{ticker}** — $ {daten['preis']:,.2f} — **{ampel_text}** ({score:+d}/5)")
-            if daten["gruende"]:
-                st.caption(" · ".join(daten["gruende"][:3]))
-            else:
-                st.caption("Keine ausschlaggebenden Indikator-Signale")
-
-        with st.expander(f"📈 Details zu {ticker} (Chart, alle Indikatoren, Backtest)", expanded=False):
-            neues_intervall = st.selectbox(
-                "Zeitraum:", options=optionen, index=optionen.index(aktueller_zeitraum), key=f"select_{ticker}"
-            )
-            projektion_anzeigen = st.checkbox("🟣 Projektions-Zone anzeigen", value=False, key=f"projektion_toggle_{ticker}")
-
-            with st.spinner("Werte Historie aus…"):
-                backtest_ergebnis = backtest_kategorie(
-                    tuple(daten["closes"]), tuple(daten["highs"]), tuple(daten["lows"]),
-                    daten["kategorie"], vorschau=5,
-                )
-
-            st.plotly_chart(
-                candlestick_chart(
-                    daten["df"],
-                    projektion=backtest_ergebnis if projektion_anzeigen else None,
-                    aktueller_preis=daten["preis"], vorschau=5,
-                ),
-                use_container_width=True,
-                config={"scrollZoom": True},
-            )
-            st.caption("↔️ Ziehen zum Verschieben, Mausrad/Pinch zum Zoomen – wie bei Binance.")
-            if projektion_anzeigen and backtest_ergebnis.get("grund") == "ok":
-                st.caption(
-                    "🟣 Violette Zone im Chart: Spanne aus bester/schlechtester historischer Entwicklung "
-                    "nach diesem Signal – keine Ziel-Vorhersage, sondern eine Bandbreite aus der Vergangenheit."
-                )
-
-            c1, c2, c3, c4 = st.columns(4)
-
-            with c1:
-                st.write("🎯 Signal-Score:")
-                zusatz = " (Long-Tendenz)" if ampel == "🟢" else " (Short-Tendenz)" if ampel == "🔴" else ""
-                anzeige = f"{kategorie}{zusatz} ({score:+d}/5)"
-                if ampel == "🟢":
-                    st.success(f"🟢 {anzeige}")
-                elif ampel == "🔴":
-                    st.error(f"🔴 {anzeige}")
-                else:
-                    st.info(f"🟡 {anzeige}")
-                for grund in daten["gruende"]:
-                    st.caption(f"• {grund}")
-
-            with c2:
-                st.write("📐 Weitere Indikatoren:")
-                st.write(f"RSI (14): **{daten['rsi']:.1f}**" if daten["rsi"] is not None else "RSI: —")
-                st.write(f"Stochastik: **{daten['stoch_k']:.1f}**" if daten["stoch_k"] is not None else "Stochastik: —")
-                if daten["adx"] is not None:
-                    trend_text = "starker Trend" if daten["trend_stark"] else "seitwärts/schwach"
-                    st.write(f"ADX: **{daten['adx']:.1f}** ({trend_text})")
-                    if not daten["trend_stark"]:
-                        st.caption("⚠️ Schwacher Trend – Signale hier tendenziell weniger verlässlich")
-                else:
-                    st.write("ADX: —")
-
-            with c3:
-                st.write("📏 Bollinger Bänder:")
-                if daten["bb_oben"] is not None:
-                    st.write(f"Oben: **$ {daten['bb_oben']:,.2f}**")
-                    st.write(f"Unten: **$ {daten['bb_unten']:,.2f}**")
-                else:
-                    st.write("Noch zu wenig Historie.")
-
-            with c4:
-                st.write("📦 Volumen (24h, ca.):")
-                if daten["volumen_aktuell"] is not None:
-                    st.write(f"Aktuell: **$ {daten['volumen_aktuell']:,.0f}**")
-                    if daten["volumen_schnitt"]:
-                        verhaeltnis = daten["volumen_aktuell"] / daten["volumen_schnitt"]
-                        st.write(f"Ø: **$ {daten['volumen_schnitt']:,.0f}**")
-                        st.write(f"{verhaeltnis:.1f}× Durchschnitt")
-                else:
-                    st.write("Nicht verfügbar.")
-
-            with st.expander("📊 Historische Trefferquote für dieses Signal (Backtest)"):
-                ergebnis = backtest_ergebnis
-                if ergebnis["grund"] == "zu_kurzer_zeitraum":
-                    st.info(
-                        "Der gewählte Zeitraum lädt zu wenige Kerzen für einen Backtest "
-                        "(braucht mindestens ca. 55). Wähle oben \"1 Monat\" oder \"3 Monate\", "
-                        "um historische Statistik zu sehen."
-                    )
-                elif ergebnis["grund"] == "zu_wenig_faelle":
-                    st.info(
-                        f"'{daten['kategorie']}' trat in der geladenen Historie nur "
-                        f"{ergebnis['anzahl']}× auf – zu wenig für eine verlässliche Aussage."
-                    )
-                else:
-                    st.markdown(
-                        f"In der geladenen Historie trat **'{daten['kategorie']}'** bisher "
-                        f"**{ergebnis['anzahl']}×** auf. 5 Kerzen später:"
-                    )
-                    st.caption(stichproben_label(ergebnis["anzahl"]))
-                    st.write(f"📈 Kurs höher: **{ergebnis['prozent_positiv']:.0f}%** der Fälle")
-                    st.write(f"Ø Veränderung: **{ergebnis['durchschnitt']:+.2f}%**")
-                    st.write(f"Beste / schlechteste Entwicklung: **{ergebnis['bester']:+.2f}%** / **{ergebnis['schlechtester']:+.2f}%**")
-                    st.caption(
-                        f"Reine Vergangenheitsstatistik dieses Coins – keine Vorhersage für das nächste Mal. "
-                        f"Bereits um {GEBUEHREN_PROZENT}% geschätzte Handelskosten (Gebühr + Slippage) bereinigt."
-                    )
-
-    st.markdown("---")
-    with st.expander("📈 Vorwärts-Tracking: Wie hätten die Signale seitdem abgeschnitten?", expanded=False):
-        st.caption(
-            "Seit du diese App nutzt, wird automatisch mitgeschrieben: Zeigt ein Coin 'Stark bullisch/bärisch', "
-            "wird notiert, was passiert wäre, wenn du dem gefolgt wärst (Ziel = Einstieg ± 2×ATR, "
-            "Stop = Einstieg ∓ 1×ATR, Zeit-Ablauf nach 30 Tagen). "
-            "Läuft nur, während die App offen ist – anders als die Telegram-Alarme kein 24/7-Hintergrundprozess. "
-            f"Ergebnisse sind bereits um {GEBUEHREN_PROZENT}% geschätzte Handelskosten pro Position bereinigt."
-        )
-        hypo = st.session_state.zustand.get("hypo_trades", {"offen": [], "geschlossen": []})
-        offen_liste = hypo.get("offen", [])
-        geschlossen_liste = hypo.get("geschlossen", [])
-
-        ziel_treffer = sum(1 for t in geschlossen_liste if t["ergebnis"] == "Ziel erreicht")
-        stop_treffer = sum(1 for t in geschlossen_liste if t["ergebnis"] == "Stop erreicht")
-        zeit_treffer = sum(1 for t in geschlossen_liste if t["ergebnis"] == "Zeit abgelaufen")
-        avg_veraenderung = (
-            sum(t["veraenderung_pct"] for t in geschlossen_liste) / len(geschlossen_liste)
-            if geschlossen_liste else 0
-        )
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Offen", len(offen_liste))
-        m2.metric("Ziel / Stop / Zeit", f"{ziel_treffer}/{stop_treffer}/{zeit_treffer}")
-        m3.metric("Geschlossen gesamt", len(geschlossen_liste))
-        m4.metric("Ø Veränderung", f"{avg_veraenderung:+.2f}%")
-        if geschlossen_liste:
-            st.caption(stichproben_label(len(geschlossen_liste)))
-
-        if offen_liste:
-            st.write("**Offene hypothetische Positionen:**")
-            for t in offen_liste:
-                st.write(
-                    f"{t['ticker']} — **{t['richtung'].upper()}** @ $ {t['einstieg']:,.2f} "
-                    f"(Ziel $ {t['ziel']:,.2f} / Stop $ {t['stop']:,.2f})"
-                )
-        if geschlossen_liste:
-            st.write("**Letzte geschlossene:**")
-            for t in geschlossen_liste[:10]:
-                zeichen = "🟢" if t["veraenderung_pct"] > 0 else "🔴"
-                st.write(
-                    f"{zeichen} {t['ticker']} {t['richtung'].upper()}: {t['ergebnis']} "
-                    f"({t['veraenderung_pct']:+.2f}%)"
-                )
-        if not offen_liste and not geschlossen_liste:
-            st.info("Noch keine hypothetischen Positionen – entsteht automatisch beim nächsten starken Signal.")
-
-    if st.button("🗑️ Watchlist zurücksetzen (Nur Core-Coins)", key="reset_btn"):
-        st.session_state.zustand["watchlist"] = ["BTC", "ETH", "SOL", "PAXG"]
-        zustand_speichern()
-        st.rerun()
-
-# ============================== TAB 2: PORTFOLIO ==============================
-with tab_portfolio:
-    st.subheader("💰 Portfolio-Tracking")
-    st.caption("Reine Nachverfolgung deiner eigenen Angaben – keine Verbindung zu einem echten Börsenkonto.")
-
-    with st.expander("➕ Neue Position hinzufügen"):
-        p_ticker = st.text_input("Coin-Kürzel:", key="portfolio_ticker").upper().strip()
-        p_kaufpreis = st.number_input("Kaufpreis pro Coin ($):", min_value=0.0, value=0.0, format="%.4f", key="portfolio_preis")
-        p_menge = st.number_input("Menge:", min_value=0.0, value=0.0, format="%.6f", key="portfolio_menge")
-        if st.button("Position speichern", key="portfolio_add_btn"):
-            if p_ticker and p_kaufpreis > 0 and p_menge > 0:
-                st.session_state.zustand["portfolio"].append({
-                    "id": str(uuid.uuid4())[:8], "ticker": p_ticker,
-                    "kaufpreis": p_kaufpreis, "menge": p_menge,
-                })
-                zustand_speichern()
-                st.success("Position gespeichert.")
-                st.rerun()
-            else:
-                st.warning("Bitte Kürzel, Kaufpreis und Menge angeben.")
-
-    portfolio = st.session_state.zustand.get("portfolio", [])
-    if portfolio:
-        zeilen = []
-        gesamt_wert = 0.0
-        gesamt_einsatz = 0.0
-        for position in portfolio:
-            coingecko_id = coingecko_id_ermitteln(position["ticker"])
-            aktueller_preis = aktuellen_preis_holen(coingecko_id) if coingecko_id else None
-            wert = (aktueller_preis if aktueller_preis is not None else position["kaufpreis"]) * position["menge"]
-            einsatz = position["kaufpreis"] * position["menge"]
-            gesamt_wert += wert
-            gesamt_einsatz += einsatz
-            zeilen.append({
-                "Coin": position["ticker"],
-                "Menge": position["menge"],
-                "Kaufpreis ($)": position["kaufpreis"],
-                "Akt. Preis ($)": aktueller_preis,
-                "Wert ($)": round(wert, 2),
-                "G/V ($)": round(wert - einsatz, 2),
-                "G/V (%)": round((wert - einsatz) / einsatz * 100, 1) if einsatz else 0,
-            })
-        st.dataframe(pd.DataFrame(zeilen), use_container_width=True, hide_index=True)
-
-        gesamt_gv = gesamt_wert - gesamt_einsatz
-        gesamt_gv_prozent = (gesamt_gv / gesamt_einsatz * 100) if gesamt_einsatz else 0
-        st.markdown(f"**Gesamtwert:** $ {gesamt_wert:,.2f} &nbsp;|&nbsp; **Gesamt G/V:** $ {gesamt_gv:,.2f} ({gesamt_gv_prozent:.1f}%)")
-
-        portfolio_verlauf_aktualisieren(gesamt_wert)
-        verlauf = st.session_state.zustand.get("portfolio_verlauf", [])
-        if len(verlauf) >= 2:
-            st.markdown("**📈 Portfolio-Wertverlauf**")
-            verlauf_df = pd.DataFrame(verlauf)
-            verlauf_df["zeit"] = pd.to_datetime(verlauf_df["zeit"])
-            verlauf_df = verlauf_df.set_index("zeit")
-            st.line_chart(verlauf_df["wert"])
-            st.caption("Wird höchstens einmal pro Stunde aktualisiert, wenn du hier vorbeischaust.")
+    with col_rechts:
+        st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
+        st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader("🔔 Live-Einstiegs-Tabelle")
+        if einstiegs_liste:
+            st.dataframe(pd.DataFrame(einstiegs_liste), use_container_width=True, hide_index=True)
         else:
-            st.caption("Der Wertverlauf wird sichtbar, sobald mehrmals über die Zeit vorbeigeschaut wurde.")
+            st.info("⏳ Aktuell keine aktiven Live-Einstiege gefunden.")
 
-        loeschen_optionen = ["–"] + [f"{p['id']}: {p['ticker']} ({p['menge']})" for p in portfolio]
-        auswahl = st.selectbox("Position entfernen:", options=loeschen_optionen, key="portfolio_remove_select")
-        if st.button("Ausgewählte Position löschen", key="portfolio_remove_btn") and auswahl != "–":
-            loeschen_id = auswahl.split(":")[0]
-            st.session_state.zustand["portfolio"] = [p for p in portfolio if p["id"] != loeschen_id]
-            zustand_speichern()
-            st.rerun()
-    else:
-        st.info("Noch keine Positionen im Portfolio.")
-
-# ============================== TAB 3: ALARME ==============================
-with tab_alarme:
-    st.subheader("🔔 Preis-Alarme")
-    st.caption(
-        "Läuft unabhängig über GitHub Actions – funktioniert auch, wenn diese Seite geschlossen ist. "
-        "Prüfung erfolgt alle 15 Minuten, Benachrichtigung per Telegram."
-    )
-
-    with st.expander("➕ Neuen Alarm hinzufügen"):
-        a_ticker = st.text_input("Coin-Kürzel:", key="alert_ticker").upper().strip()
-        a_typ_anzeige = st.selectbox("Bedingung:", options=[
-            "Preis über Schwelle", "Preis unter Schwelle",
-            "RSI über Schwelle (überkauft)", "RSI unter Schwelle (überverkauft)",
-        ], key="alert_typ")
-        a_schwelle = st.number_input("Schwellenwert:", value=0.0, key="alert_schwelle")
-        if st.button("Alarm speichern", key="alert_add_btn"):
-            typ_map = {
-                "Preis über Schwelle": "preis_ueber",
-                "Preis unter Schwelle": "preis_unter",
-                "RSI über Schwelle (überkauft)": "rsi_ueber",
-                "RSI unter Schwelle (überverkauft)": "rsi_unter",
-            }
-            if a_ticker and a_schwelle != 0.0:
-                st.session_state.zustand["alerts"].append({
-                    "id": str(uuid.uuid4())[:8], "ticker": a_ticker,
-                    "typ": typ_map[a_typ_anzeige], "schwelle": a_schwelle, "ausgeloest": False,
-                })
-                zustand_speichern()
-                st.success("Alarm gespeichert – wird spätestens in 15 Minuten aktiv überwacht.")
-                st.rerun()
-            else:
-                st.warning("Bitte Kürzel und einen Schwellenwert ungleich 0 angeben.")
-
-    alerts = st.session_state.zustand.get("alerts", [])
-    if alerts:
-        for alarm in alerts:
-            status = "✅ Ausgelöst" if alarm.get("ausgeloest") else "⏳ Aktiv"
-            st.write(f"{status} — **{alarm['ticker']}**: {ALARM_TYP_ANZEIGE.get(alarm['typ'], alarm['typ'])} {alarm['schwelle']}")
-
-        loeschen_optionen = ["–"] + [f"{a['id']}: {a['ticker']}" for a in alerts]
-        auswahl = st.selectbox("Alarm löschen:", options=loeschen_optionen, key="alert_remove_select")
-        if st.button("Ausgewählten Alarm löschen", key="alert_remove_btn") and auswahl != "–":
-            loeschen_id = auswahl.split(":")[0]
-            st.session_state.zustand["alerts"] = [a for a in alerts if a["id"] != loeschen_id]
-            zustand_speichern()
-            st.rerun()
-    else:
-        st.info("Noch keine Alarme eingerichtet.")
-
-    st.markdown("---")
-    st.markdown(
-        """
-        **⚠️ Wichtig:** Alarme sind reine Schwellenwert-Benachrichtigungen, keine Kauf-/Verkaufsempfehlung.
-        Ein ausgelöster Alarm deaktiviert sich automatisch (kein Dauer-Spam) – zum Neustart einfach löschen
-        und neu anlegen.
-        """
-    )
-
-# ============================== TAB 4: HANDELSSITZUNGEN ==============================
-with tab_sitzungen:
-    st.subheader("🌍 Handelssitzungen – Live-Status")
-    st.caption(
-        "Sitzungszeiten beeinflussen zuverlässig die **Volatilität** (wie stark sich der Kurs bewegt) – "
-        "aber NICHT die Richtung (ob er steigt oder fällt). Das hier ist eine Info-Übersicht plus "
-        "historische Statistik, **keine Vorhersage und keine Handelsempfehlung.**"
-    )
-
-    sitzungen, jetzt_utc = sitzungs_status()
-    st.markdown(f"Aktuelle Uhrzeit (UTC): **{jetzt_utc.strftime('%H:%M')}** | Deine Zeit (Wien): **{jetzt_utc.astimezone(ZoneInfo(LOKALE_ZEITZONE)).strftime('%H:%M')}**")
-
-    for s in sitzungen:
-        start_lokal = utc_stunde_zu_lokal(s["start_utc"])
-        ende_lokal = utc_stunde_zu_lokal(s["ende_utc"])
-        status = "🟢 Geöffnet" if s["offen"] else "⚪ Geschlossen"
-        st.write(f"**{s['name']}**: {status} — öffnet {start_lokal} Uhr, schließt {ende_lokal} Uhr (deine Zeit)")
-
-    st.caption(
-        "Zeiten sind gängige, häufig verwendete Richtwerte für Handelssitzungen – keine offiziell "
-        "regulierten Öffnungszeiten. Krypto und Gold-Token wie PAXG handeln durchgehend (24/7)."
-    )
-
-    st.markdown("---")
-    st.subheader("📊 24-Stunden-Analyse: Historische Ø-Kursbewegung je Uhrzeit")
-    st.caption(
-        "Grün = historisch eher long-lastig (Kurs stieg im Schnitt), Rot = eher short-lastig "
-        "(Kurs fiel im Schnitt). Das ist eine Beschreibung der Vergangenheit, **keine Vorhersage "
-        "und keine Handelsempfehlung** für heute."
-    )
-
-    watchlist_optionen = st.session_state.zustand.get("watchlist", ["BTC", "ETH", "SOL", "PAXG"])
-    if watchlist_optionen:
-        index_gold = watchlist_optionen.index("PAXG") if "PAXG" in watchlist_optionen else 0
-        coin_auswahl = st.selectbox("Coin auswählen:", options=watchlist_optionen, index=index_gold, key="sitzung_coin")
-        vorschau_stunden = st.slider(
-            "Kursentwicklung wie viele Stunden später betrachten?",
-            min_value=1, max_value=6, value=2, key="sitzung_vorschau",
-        )
-
-        coingecko_id = coingecko_id_ermitteln(coin_auswahl)
-        if coingecko_id:
-            with st.spinner("Werte Historie aus…"):
-                punkte = coingecko_preise_mit_zeit_holen(coingecko_id, tage=90)
-
-            analyse = stunden_analyse(punkte, vorschau_stunden)
-            if analyse["grund"] == "keine_daten":
-                st.warning(
-                    "Keine Kursdaten von CoinGecko erhalten – meist ein kurzes Rate-Limit "
-                    "(z. B. nach vielen Anfragen im Beobachtung-Tab). Kurz warten und "
-                    "\"🔄 Daten neu laden\" oben klicken, oder Seite neu laden."
-                )
-            elif analyse["grund"] == "zu_wenig_pro_stunde":
-                st.info("Zu wenig historische Vorkommen pro Stunde für eine verlässliche Aussage.")
-            else:
-                ergebnis = analyse["stunden"]
-                st.plotly_chart(stunden_chart(ergebnis), use_container_width=True)
-                bullischste = max(ergebnis.items(), key=lambda kv: kv[1]["durchschnitt"])
-                baerischste = min(ergebnis.items(), key=lambda kv: kv[1]["durchschnitt"])
-                c1, c2 = st.columns(2)
-                c1.metric(
-                    f"Historisch stärkste Stunde ({utc_stunde_zu_lokal(bullischste[0])} Uhr)",
-                    f"{bullischste[1]['durchschnitt']:+.2f}%",
-                )
-                c2.metric(
-                    f"Historisch schwächste Stunde ({utc_stunde_zu_lokal(baerischste[0])} Uhr)",
-                    f"{baerischste[1]['durchschnitt']:+.2f}%",
-                )
-                st.caption(f"Basis: letzte 90 Tage, {coin_auswahl}. Werte je Stunde beruhen auf mindestens 5 historischen Vorkommen.")
-
-                st.markdown("---")
-                st.markdown("**📌 Besondere Zeitfenster – Live-Status**")
-                st.caption(
-                    "Zeigt, ob du gerade in einem besonderen Zeitfenster bist, plus das aktuelle "
-                    "Live-Signal des Coins – keine historische Statistik, kein Blick in die Zukunft."
-                )
-
-                with st.spinner("Lade aktuelles Signal…"):
-                    zeitraum_fuer_live = st.session_state.get(f"select_{coin_auswahl}", "🕐 1 Stunde")
-                    if zeitraum_fuer_live not in TIMEFRAME_OPTIONEN:
-                        zeitraum_fuer_live = "🕐 1 Stunde"
-                    live_daten, live_fehler = coin_daten_laden(coin_auswahl, zeitraum_fuer_live)
-
-                if live_daten:
-                    live_kat = live_daten["kategorie"]
-                    if live_kat.startswith("Stark bullisch") or live_kat.startswith("Leicht bullisch"):
-                        live_ampel, live_text = "🟢", "Bullisch (Long-Tendenz)"
-                    elif live_kat.startswith("Stark bärisch") or live_kat.startswith("Leicht bärisch"):
-                        live_ampel, live_text = "🔴", "Bärisch (Short-Tendenz)"
-                    else:
-                        live_ampel, live_text = "🟡", "Neutral"
-                    st.write(f"**Aktuelles Live-Signal ({coin_auswahl}):** {live_ampel} {live_text} ({live_daten['score']:+d}/5)")
-                else:
-                    st.warning(f"Aktuelles Live-Signal für {coin_auswahl} nicht verfügbar – Grund: {live_fehler}")
-
-                jetzt_stunde = jetzt_utc.hour
-                ny_start = SITZUNGEN["🇺🇸 Amerika (New York)"]["start_utc"]
-                london_ende = SITZUNGEN["🇬🇧 Europa (London)"]["ende_utc"]
-
-                ny_aktiv = jetzt_stunde == ny_start
-                status_text = "🟢 JETZT AKTIV" if ny_aktiv else "⚪ nicht aktiv"
-                st.write(f"🇺🇸 **New-York-Eröffnung** ({utc_stunde_zu_lokal(ny_start)} Uhr deine Zeit): {status_text}")
-
-                ueberlappung_aktiv = ny_start <= jetzt_stunde < london_ende
-                status_text = "🟢 JETZT AKTIV" if ueberlappung_aktiv else "⚪ nicht aktiv"
-                st.write(
-                    f"🔀 **London-New-York-Überlappung** (ca. {utc_stunde_zu_lokal(ny_start)}–"
-                    f"{utc_stunde_zu_lokal(london_ende)} Uhr deine Zeit): {status_text}"
-                )
-
-                if coin_auswahl == "PAXG":
-                    am_fix_stunde = london_zeit_zu_utc_stunde(10, 30)
-                    pm_fix_stunde = london_zeit_zu_utc_stunde(15, 0)
-                    am_fix_aktiv = jetzt_stunde == am_fix_stunde
-                    pm_fix_aktiv = jetzt_stunde == pm_fix_stunde
-                    st.write(
-                        f"🌅 **LBMA AM-Fix** ({utc_stunde_zu_lokal(am_fix_stunde)} Uhr deine Zeit): "
-                        f"{'🟢 JETZT AKTIV' if am_fix_aktiv else '⚪ nicht aktiv'}"
-                    )
-                    st.write(
-                        f"🌇 **LBMA PM-Fix** ({utc_stunde_zu_lokal(pm_fix_stunde)} Uhr deine Zeit): "
-                        f"{'🟢 JETZT AKTIV' if pm_fix_aktiv else '⚪ nicht aktiv'}"
-                    )
-        else:
-            st.warning("Coin konnte nicht aufgelöst werden.")
-    else:
-        st.info("Noch keine Coins auf der Watchlist (Reiter 📊 Beobachtung).")
-
-    st.markdown("---")
-    st.subheader("📈 Aktien – Live-Snapshot")
-    if not FINNHUB_API_KEY:
-        st.info("Finnhub-Key noch nicht in den Secrets eingetragen (FINNHUB_API_KEY) – dieser Bereich bleibt bis dahin leer.")
-    else:
-        st.caption(
-            "Finnhub bietet auf dem kostenlosen Plan keine historischen Kerzen für Aktien – deshalb nur "
-            "der aktuelle Live-Stand, keine Indikatoren, kein Signal-Score wie bei Krypto/Gold."
-        )
-        for symbol in AKTIEN_TICKER:
-            quote = finnhub_quote_holen(symbol)
-            snapshot = aktien_snapshot_auswerten(quote)
-            if snapshot is None:
-                st.warning(f"{symbol}: Keine Daten verfügbar (Rate-Limit oder API nicht erreichbar).")
-                continue
-            zeichen = "🟢" if (snapshot["veraenderung_tag"] or 0) >= 0 else "🔴"
-            tag_text = f"{snapshot['veraenderung_tag']:+.2f}%" if snapshot["veraenderung_tag"] is not None else "—"
-            open_text = f"{snapshot['veraenderung_seit_open']:+.2f}%" if snapshot["veraenderung_seit_open"] is not None else "—"
-            open_label = "seit Markteröffnung heute" if (snapshot["alter_stunden"] or 0) < 20 else "seit letzter Markteröffnung"
-            st.write(
-                f"{zeichen} **{symbol}**: $ {snapshot['preis']:,.2f} — "
-                f"seit Vortagesschluss **{tag_text}** — {open_label} **{open_text}**"
-            )
-            if snapshot["alter_stunden"] is not None and snapshot["alter_stunden"] > 20:
-                st.caption(
-                    f"⚠️ Markt vermutlich geschlossen (Wochenende/Feiertag) – Werte vom letzten Handelstag, "
-                    f"vor {snapshot['alter_stunden']:.0f} Stunden aktualisiert."
-                )
-
-# ============================== TAB 5: TOP BEWEGUNGEN ==============================
-with tab_bewegungen:
-    st.subheader("🔥 Größte Marktbewegungen")
-    st.caption(
-        "Scannt die Top 500 Coins nach Marktkapitalisierung auf CoinGecko nach den stärksten "
-        "Ausschlägen in beide Richtungen. Reine Kursbewegung – **keine Kauf-/Verkaufsempfehlung.**"
-    )
-
-    c1, c2, c3 = st.columns(3)
-    zeitraum_anzeige = c1.selectbox("Zeitraum:", options=["1 Stunde", "24 Stunden"], index=1, key="bewegung_zeitraum")
-    schwelle = c2.number_input("Mindest-Veränderung (%):", min_value=1.0, value=10.0, step=5.0, key="bewegung_schwelle")
-    anzahl = c3.slider("Wie viele anzeigen?", min_value=5, max_value=10, value=10, key="bewegung_anzahl")
-
-    if st.button("🔄 Markt neu scannen", key="bewegung_scan_btn"):
-        coingecko_markt_uebersicht.clear()
-        st.rerun()
-
-    with st.spinner("Scanne Markt (Top 500 Coins)…"):
-        marktdaten = coingecko_markt_uebersicht(seiten=2)
-
-    if not marktdaten:
-        st.error("Marktdaten aktuell nicht abrufbar (API nicht erreichbar oder Rate-Limit).")
-    else:
-        zeitraum_code = "1h" if zeitraum_anzeige == "1 Stunde" else "24h"
-        gewinner, verlierer = top_bewegungen(marktdaten, zeitraum_code, schwelle, anzahl)
-
-        if not gewinner and not verlierer:
-            st.info(
-                f"Aktuell kein Coin unter den Top 500 mit {schwelle:.0f}%+ Veränderung in {zeitraum_anzeige}. "
-                "Das ist normal – so starke Bewegungen sind selten. Schwellenwert oben ggf. senken."
-            )
-        else:
-            st.caption(
-                "Der Pfeil zeigt, wie oft dieser Coin in seiner eigenen Historie nach ähnlich starken "
-                "Bewegungen in dieselbe Richtung weitergegangen ist – reine Vergangenheitsstatistik, "
-                "keine Vorhersage."
-            )
-            col_gewinner, col_verlierer, col_meme = st.columns(3)
-
-            with col_gewinner:
-                st.markdown(f"**📈 Top Gewinner ({len(gewinner)})**")
-                if not gewinner:
-                    st.caption("Keine Treffer.")
-                for coin in gewinner:
-                    with st.spinner(f"Analysiere {coin['symbol']}…"):
-                        wsk = richtungs_wahrscheinlichkeit(coin["id"], coin["veraenderung"]) if coin["id"] else None
-                    warnung = " ⚠️" if wsk and wsk["anzahl"] < 10 else ""
-                    zusatz = f" · {'↑' if wsk['weiter_prozent'] > 50 else '↓'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']}{warnung})" if wsk else ""
-                    st.write(f"🟢 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
-
-            with col_verlierer:
-                st.markdown(f"**📉 Top Verlierer ({len(verlierer)})**")
-                if not verlierer:
-                    st.caption("Keine Treffer.")
-                for coin in verlierer:
-                    with st.spinner(f"Analysiere {coin['symbol']}…"):
-                        wsk = richtungs_wahrscheinlichkeit(coin["id"], coin["veraenderung"]) if coin["id"] else None
-                    warnung = " ⚠️" if wsk and wsk["anzahl"] < 10 else ""
-                    zusatz = f" · {'↓' if wsk['weiter_prozent'] > 50 else '↑'} {wsk['weiter_prozent']:.0f}% weiter (n={wsk['anzahl']}{warnung})" if wsk else ""
-                    st.write(f"🔴 **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**{zusatz}")
-
-            with col_meme:
-                with st.spinner("Lade Meme-Coins…"):
-                    meme_marktdaten = coingecko_meme_coins_holen()
-                meme_gewinner, meme_verlierer = top_bewegungen(meme_marktdaten, zeitraum_code, schwelle, anzahl)
-                meme_alle = meme_gewinner + meme_verlierer
-                st.markdown(f"**🐸 Meme-Coins ({len(meme_alle)})**")
-                if not meme_alle:
-                    st.caption("Keine Treffer bei diesem Schwellenwert.")
-                for coin in meme_alle:
-                    zeichen = "🟢" if coin["veraenderung"] > 0 else "🔴"
-                    st.write(f"{zeichen} **{coin['symbol']}** ({coin['name']}) — $ {coin['preis']:,.4f} — **{coin['veraenderung']:+.1f}%**")
-                st.caption(f"Kuratierte Liste ({', '.join(MEME_COIN_IDS.keys())}) – ohne Richtungs-Pfeil, um Anfragen zu sparen.")
-            st.caption("⚠️ = geringe Stichprobe, mit Vorsicht zu genießen.")
-
-# ============================== TAB 6: STATUS ==============================
-with tab_status:
-    st.subheader("🩺 System-Status")
-    st.caption(
-        "Prüft, ob die verwendeten Datenquellen gerade erreichbar sind. Nutzt minimale "
-        "Anfragen und wird alle 10 Minuten automatisch neu geprüft."
-    )
-    if st.button("🔄 Jetzt neu prüfen", key="status_refresh_btn"):
-        status_pruefen.clear()
-        st.rerun()
-
-    with st.spinner("Prüfe Datenquellen…"):
-        status_ergebnisse = status_pruefen()
-
-    for name, (ok, fehler) in status_ergebnisse.items():
-        if ok is True:
-            st.success(f"✅ **{name}**: erreichbar")
-        elif ok is False:
-            st.error(f"❌ **{name}**: {fehler}")
-        else:
-            st.info(f"➖ **{name}**: {fehler}")
-
-    st.markdown("---")
-    st.caption(
-        "**Telegram / GitHub Actions** lassen sich von hier aus nicht prüfen – der Bot-Token liegt "
-        "nur in den GitHub-Secrets, nicht in denen dieser App. Status dafür direkt auf GitHub im "
-        "Reiter \"Actions\" nachsehen (grüner Haken = letzter Lauf erfolgreich)."
-    )
+time.sleep(10)
+st.rerun()
