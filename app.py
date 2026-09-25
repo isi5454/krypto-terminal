@@ -147,19 +147,21 @@ if daten_liste:
             st_alarm_ausloesen = True
             richtung_icon = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
             einstiegs_liste.append({
-                "Ticker": row["Ticker"], "Richtung": richtung_icon,
+                "Ticker": row["Ticker"], "Richtung": richticon if 'richtung_icon' in locals() else richtung_icon,
                 "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)
             })
             
-            # Automatische Handy-Benachrichtigung über Telegram absenden
             coin_key = f"{row['Ticker']}_{richtung_icon}"
             letzter_send_zeitpunkt = st.session_state.gesendete_alarme.get(coin_key, 0)
-            if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:  # 15 Minuten Spam-Schutz
+            if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:
                 msg = f"🔔 *NEUES TRADING SIGNAL*\n\n🪙 *Coin:* {row['Ticker']}-USD\n📊 *Richtung:* {richtung_icon}\n💵 *Einstieg:* ${round(c_pr, 2)}\n🛑 *SL:* ${round(sl_u, 2)}\n🎯 *TP:* ${round(tp_u, 2)}\n⏱️ *Intervall:* {interval_auswahl}"
                 send_telegram_message(msg)
                 st.session_state.gesendete_alarme[coin_key] = aktueller_zeitstempel
 
-    # --- GEWOHNTES LAYOUT ---
+    if st_alarm_ausloesen:
+        st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/mpeg"></audio>""", height=0)
+
+    # --- GEWOHNTES 2-SPALTEN LAYOUT (REPARIERT & SYMMETRISCH) ---
     col_links, col_rechts = st.columns(2)
     
     with col_links:
@@ -191,9 +193,9 @@ if daten_liste:
             coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
             if not coin_row.empty:
                 try:
-                    c_pr = float(coin_row["raw_pr"].iloc[0])
-                    c_atr = float(coin_row["raw_atr"].iloc[0])
-                    c_sma = float(coin_row["raw_sma"].iloc[0])
+                    c_pr = float(coin_row["raw_pr"].values[0])
+                    c_atr = float(coin_row["raw_atr"].values[0])
+                    c_sma = float(coin_row["raw_sma"].values[0])
                     sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
                     tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
                     fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
@@ -206,4 +208,3 @@ if daten_liste:
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
     with col_rechts:
-        st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
