@@ -163,17 +163,24 @@ if daten_liste:
             coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
             if not coin_row.empty:
                 try:
-                    c_pr = float(coin_row["raw_pr"].values[0])
-                    c_atr = float(coin_row["raw_atr"].values[0])
-                    c_sma = float(coin_row["raw_sma"].values[0])
+                    c_pr = float(coin_row["raw_pr"].values)
+                    c_atr = float(coin_row["raw_atr"].values)
+                    c_sma = float(coin_row["raw_sma"].values)
                     sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
                     tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
                     fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
                     fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
                     fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
                 except: pass
-            fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
+            
+            # Hier haben wir den lästigen Rangeslider komplett entfernt und flüssiges Mausrad-Scrollen aktiviert
+            fig.update_layout(
+                template="plotly_dark", 
+                paper_bgcolor="#181A20", 
+                plot_bgcolor="#181A20",
+                xaxis=dict(rangeslider=dict(visible=False))
+            )
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
     with col_rechts:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
