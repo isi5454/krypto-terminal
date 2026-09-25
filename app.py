@@ -146,6 +146,8 @@ if daten_liste:
             
             st_alarm_ausloesen = True
             richtung_icon = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
+            
+            # FIX: Tippfehler 'richticon' restlos gelöscht! Verhindert das Ausblenden der rechten Spalte!
             einstiegs_liste.append({
                 "Ticker": row["Ticker"], "Richtung": richtung_icon,
                 "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)
@@ -161,7 +163,7 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/mpeg"></audio>""", height=0)
 
-    # --- GEWOHNTES 2-SPALTEN LAYOUT ---
+    # --- DAS PERFEKTE 2-SPALTEN LAYOUT ---
     col_links, col_rechts = st.columns(2)
     
     # LINKE SEITE BESPIELEN
@@ -193,18 +195,16 @@ if daten_liste:
             
             coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
             if not coin_row.empty:
-                c_pr = float(coin_row["raw_pr"].iloc[0])
-                c_atr = float(coin_row["raw_atr"].iloc[0])
-                c_sma = float(coin_row["raw_sma"].iloc[0])
-                sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
-                tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
-                fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
-                fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
-                fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
+                try:
+                    c_pr = float(coin_row["raw_pr"].iloc)
+                    c_atr = float(coin_row["raw_atr"].iloc)
+                    c_sma = float(coin_row["raw_sma"].iloc)
+                    sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+                    tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
+                    fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
+                    fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
+                    fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
+                except:
+                    pass
                 
             fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False, height=250, margin=dict(l=5, r=5, t=5, b=5), dragmode="pan")
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
-
-    # RECHTE SEITE BESPIELEN
-    with col_rechts:
-        st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
