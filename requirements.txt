@@ -1,6 +1,7 @@
 streamlit
-pandas
-numpy
-yfinance
-plotly
-urllib3
+   pandas
+   numpy
+   yfinance
+   plotly
+   urllib3
+   requests
