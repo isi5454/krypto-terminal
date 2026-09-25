@@ -12,6 +12,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Startkonfiguration (Zwingt das Layout in die volle Breite und blockiert Übersetzer-Abstürze)
 st.set_page_config(page_title="KRIPTO RADAR V9", page_icon="📊", layout="wide")
 
+# INTEGRATION DER MOBIL-WEICHE: PC bleibt groß und breit, Handy wird kompakt wie eine App!
 st.markdown("""
     <html lang="de" class="notranslate" translate="no">
     <head><meta name="google" content="notranslate" /></head>
@@ -19,7 +20,15 @@ st.markdown("""
     <style>
     .stApp { background-color: #0B0E11; color: #EAECEF; }
     h1, h2, h3, h4 { color: #EAECEF !important; margin-bottom: 2px !important; margin-top: 5px !important; }
+    
+    /* PC Modus: Tabellen haben die gewohnte, feste Höhe */
     div[data-testid="stDataFrame"] > div { max-height: none !important; height: 350px !important; }
+    
+    /* HANDY MODUS AUTOMATIK: Wenn der Bildschirm schmaler als 768px ist (Smartphone) */
+    @media (max-width: 768px) {
+        div[data-testid="stDataFrame"] > div { height: 220px !important; }
+        .stHorizontalBlock { display: flex !important; flex-direction: column !important; }
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -53,10 +62,10 @@ interval_auswahl = st.sidebar.selectbox(
 )
 
 yf_perioden = {"1 Minute": "1d", "5 Minuten": "5d", "15 Minuten": "7d", "1 Stunde": "30d", "4 Stunden": "30d", "1 Tag": "300d"}
-yf_intervalle = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
+yf_intervalne = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
 
 gewaehlte_periode = yf_perioden[interval_auswahl]
-gewaehltes_intervall = yf_intervalle[interval_auswahl]
+gewaehltes_intervall = yf_intervalne[interval_auswahl]
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Coin hinzufügen")
@@ -161,22 +170,21 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/mpeg"></audio>""", height=0)
 
-    # --- REPARATUR: UNZERSTÖRBARES LAYOUT OHNE VERWIRRENDE WITH-BLÖCKE ---
+    # --- GEWOHNTES 2-SPALTEN LAYOUT ---
     col_links, col_rechts = st.columns(2)
     
-    # Linke Seite aufbauen
-    col_links.markdown(f"### 🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
+    col_links.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
     col_links.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
     
     col_links.markdown("---")
-    col_links.markdown("### 📋 Meine persönlichen Krypto-Favoriten")
+    col_links.subheader("📋 Meine persönlichen Krypto-Favoriten")
     if not favoriten_df.empty:
         col_links.dataframe(favoriten_df[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
     else:
         col_links.info("💡 Deine Liste ist aktuell leer. Füge links Wunsch-Coins hinzu!")
         
     col_links.markdown("---")
-    col_links.markdown("### 📊 Live-Chartstation")
+    col_links.subheader("📊 Live-Chartstation")
     chart_liste = list(global_df["Ticker"].unique())
     ausgewaehlter_coin = col_links.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
     col_links.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
@@ -193,9 +201,9 @@ if daten_liste:
         coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
         if not coin_row.empty:
             try:
-                c_pr = float(coin_row["raw_pr"].iloc[0])
-                c_atr = float(coin_row["raw_atr"].iloc[0])
-                c_sma = float(coin_row["raw_sma"].iloc[0])
+                c_pr = float(coin_row["raw_pr"].iloc)
+                c_atr = float(coin_row["raw_atr"].iloc)
+                c_sma = float(coin_row["raw_sma"].iloc)
                 sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
                 tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
                 fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
@@ -204,8 +212,3 @@ if daten_liste:
             except:
                 pass
             
-        fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False, height=250, margin=dict(l=5, r=5, t=5, b=5), dragmode="pan")
-        col_links.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
-
-    # Rechte Seite aufbauen
-    col_rechts.markdown(f"### 🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
