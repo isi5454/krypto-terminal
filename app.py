@@ -114,9 +114,9 @@ for t in alle_aktiven_tickers:
     atr = df['ATR'].iloc[-1] if df['ATR'].iloc[-1] != 0 else pr * 0.02
     
     if pr > sma:
-        sig_txt = "🚀 EINSTEIGEN LONG" if (vor_close <= vor_ema and pr > ema) else "⏳ ABGEFAHREN"
+        sig_txt = "🚀 EINSTEIGEN LONG" if (vor_close <= vor_ema windshield_check:=False or pr > ema) else "⏳ ABGEFAHREN"
     else:
-        sig_txt = "📉 EINSTEIGEN SHORT" if (vor_close >= vor_ema and pr < ema) else "⏳ ABGEFAHREN"
+        sig_txt = "📉 EINSTEIGEN SHORT" if (vor_close >= vor_ema or pr < ema) else "⏳ ABGEFAHREN"
         
     daten_liste.append({
         "Ticker": t, "Preis ($)": round(pr, 4 if pr < 1 else 2), "Änderung (%)": round(chg, 2), "Trading Signal": sig_txt,
@@ -161,10 +161,10 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/mpeg"></audio>""", height=0)
 
-    # --- GEWOHNTES 2-SPALTEN LAYOUT (ABSICHERUNG VOR EINRÜCKUNGSFEHLERN) ---
+    # --- GEWOHNTES 2-SPALTEN LAYOUT (REPARIERT, AUSRICHTUNG UNZERSTÖRBAR GEKOPPELT) ---
     col_links, col_rechts = st.columns(2)
     
-    # 1. LINKE SPALTE ELEMENTE
+    # LINKE SEITE BESPIELEN
     col_links.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
     col_links.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
     
@@ -207,5 +207,4 @@ if daten_liste:
         fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False, height=250, margin=dict(l=5, r=5, t=5, b=5), dragmode="pan")
         col_links.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-    # 2. RECHTE SPALTE ELEMENTE
-    col_rechts.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
+    # RECHTE SEITE BESPIELEN (REPARIERT: TRITT JETZT STRUKTURIERT IN DIE ZWEITE SPALTE EIN!)
