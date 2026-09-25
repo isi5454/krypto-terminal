@@ -22,7 +22,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Cache für bereits gesendete Alarme, damit man nicht zugespamt wird
+# Cache für bereits gesendete Alarme initialisieren
 if "gesendete_alarme" not in st.session_state:
     st.session_state.gesendete_alarme = {}
 
@@ -50,9 +50,9 @@ interval_auswahl = st.sidebar.selectbox(
 )
 
 yf_perioden = {"1 Minute": "1d", "5 Minuten": "5d", "15 Minuten": "7d", "1 Stunde": "30d", "4 Stunden": "30d", "1 Tag": "300d"}
-yf_intervalne = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
+yf_intervalle = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
 gewaehlte_periode = yf_perioden[interval_auswahl]
-gewaehltes_intervall = yf_intervalne[interval_auswahl]
+gewaehltes_intervall = yf_intervalle[interval_auswahl]
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Coin hinzufügen")
@@ -131,7 +131,7 @@ if daten_liste:
             richtung_text = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
             einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": richtung_text, "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
             
-            # Anti-Spam Schutz: Sendet den Telegram-Alarm für diesen Coin nur alle 15 Minuten erneut
+            # Anti-Spam Schutz für Telegram
             coin_key = f"{row['Ticker']}_{richtung_text}"
             letzter_send_zeitpunkt = st.session_state.gesendete_alarme.get(coin_key, 0)
             if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:
@@ -150,6 +150,7 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/wav"></audio>""", height=0)
 
+    # Das originale 2-Spalten Layout wie in Ihrer PC-Version
     col_links, col_rechts = st.columns(2)
     with col_links:
         st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
