@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, random, time
+import os, random, time, requests
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -22,8 +22,23 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# Cache für bereits gesendete Alarme, damit man nicht zugespamt wird
+if "gesendete_alarme" not in st.session_state:
+    st.session_state.gesendete_alarme = {}
+
 if "meine_favoriten" not in st.session_state:
     st.session_state.meine_favoriten = ["BTC", "ETH"]
+
+# Funktion zum Senden von Telegram-Nachrichten
+def send_telegram_message(message):
+    try:
+        token = st.secrets["TELEGRAM_TOKEN"]
+        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+        url = f"https://telegram.org{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
+        requests.post(url, json=payload, timeout=5)
+    except:
+        pass
 
 st.title("📊 KRIPTO SWING RADAR V9 – PRO TRADER TERMINAL")
 
@@ -35,9 +50,9 @@ interval_auswahl = st.sidebar.selectbox(
 )
 
 yf_perioden = {"1 Minute": "1d", "5 Minuten": "5d", "15 Minuten": "7d", "1 Stunde": "30d", "4 Stunden": "30d", "1 Tag": "300d"}
-yf_intervalle = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
+yf_intervalne = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
 gewaehlte_periode = yf_perioden[interval_auswahl]
-gewaehltes_intervall = yf_intervalle[interval_auswahl]
+gewaehltes_intervall = yf_intervalne[interval_auswahl]
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Coin hinzufügen")
@@ -103,13 +118,34 @@ if daten_liste:
     favoriten_df = global_df[global_df["Ticker"].isin(st.session_state.meine_favoriten)]
     st_alarm_ausloesen = False
     einstiegs_liste = []
+    
+    aktueller_zeitstempel = time.time()
+    
     for _, row in global_df.iterrows():
         if "EINSTEIGEN" in row["Trading Signal"]:
             c_pr, c_atr, c_sma = row["raw_pr"], row["raw_atr"], row["raw_sma"]
             sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
             tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
             st_alarm_ausloesen = True
-            einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": "🚀 LONG" if c_pr > c_sma else "📉 SHORT", "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
+            
+            richtung_text = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
+            einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": richtung_text, "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
+            
+            # Anti-Spam Schutz: Sendet den Telegram-Alarm für diesen Coin nur alle 15 Minuten erneut
+            coin_key = f"{row['Ticker']}_{richtung_text}"
+            letzter_send_zeitpunkt = st.session_state.gesendete_alarme.get(coin_key, 0)
+            if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:
+                msg = (
+                    f"🔔 *NEUES TRADING SIGNAL*\n\n"
+                    f"🪙 *Coin:* {row['Ticker']}-USD\n"
+                    f"📊 *Richtung:* {richtung_text}\n"
+                    f"💵 *Einstieg:* ${round(c_pr, 4 if c_pr < 1 else 2)}\n"
+                    f"🛑 *Stop Loss (SL):* ${round(sl_u, 4 if sl_u < 1 else 2)}\n"
+                    f"🎯 *Take Profit (TP):* ${round(tp_u, 4 if tp_u < 1 else 2)}\n"
+                    f"⏱️ *Intervall:* {interval_auswahl}"
+                )
+                send_telegram_message(msg)
+                st.session_state.gesendete_alarme[coin_key] = aktueller_zeitstempel
 
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/wav"></audio>""", height=0)
@@ -139,9 +175,9 @@ if daten_liste:
             coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
             if not coin_row.empty:
                 try:
-                    c_pr = float(coin_row["raw_pr"].values[0])
-                    c_atr = float(coin_row["raw_atr"].values[0])
-                    c_sma = float(coin_row["raw_sma"].values[0])
+                    c_pr = float(coin_row["raw_pr"].values)
+                    c_atr = float(coin_row["raw_atr"].values)
+                    c_sma = float(coin_row["raw_sma"].values)
                     sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
                     tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
                     fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
@@ -155,11 +191,3 @@ if daten_liste:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
         st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         st.markdown("---")
-        st.subheader("🔔 Live-Einstiegs-Tabelle")
-        if einstiegs_liste:
-            st.dataframe(pd.DataFrame(einstiegs_liste), use_container_width=True, hide_index=True)
-        else:
-            st.info("⏳ Aktuell keine aktiven Live-Einstiege gefunden.")
-
-time.sleep(10)
-st.rerun()
