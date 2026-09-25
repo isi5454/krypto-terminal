@@ -147,7 +147,6 @@ if daten_liste:
     if st_alarm_ausloesen:
         st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/wav"></audio>""", height=0)
 
-    # 2-Spalten Layout wie gewohnt
     col_links, col_rechts = st.columns(2)
     with col_links:
         st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
@@ -189,7 +188,7 @@ if daten_liste:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
         st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         st.markdown("---")
-        
-        # Tabelle sauber verankert
         st.subheader(f"🔥 AKTUELLE COINS IM LIVE-EINSTIEG ({interval_auswahl})")
         if einstiegs_liste:
+            st.dataframe(pd.DataFrame(einstiegs_liste), use_container_width=True, hide_index=True)
+        else:
