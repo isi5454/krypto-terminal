@@ -38,7 +38,7 @@ def send_telegram_message(message):
     except:
         pass
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=15)
 def daten_laden(ticker, periode, intervall):
     try:
         df = yf.Ticker(f"{ticker.upper()}-USD").history(period=periode, interval=intervall)
@@ -87,25 +87,17 @@ if st.sidebar.button("🗑️ Liste zurücksetzen"):
 st.sidebar.markdown("---")
 st.sidebar.markdown(" Währung: **USD ($)**")
 
-# Alternative, stabile US-Schnittstelle für globale Marktdaten (verhindert Sperren komplett)
-basis_tickers = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOT", "LINK", "DOGE", "SHIB"]
-global_liste = []
-for t in basis_tickers:
-    try:
-        res = requests.get(f"https://coinbase.com{t}-USD/spot", timeout=2).json()
-        pr_val = float(res['data']['amount'])
-        global_liste.append({"Ticker": t, "Preis ($)": round(pr_val, 2), "Änderung (%)": 0.0, "Trading Signal": "⏳ LIVE"})
-    except: pass
+basis_tickers = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOT", "LINK", "DOGE", "SHIB", "AVAX", "NEAR", "LTC", "PEPE", "SUI"]
+alle_aktiven_tickers = list(set(basis_tickers + st.session_state.meine_favoriten))
 
-global_df = pd.DataFrame(global_liste) if global_liste else pd.DataFrame(columns=["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"])
-
+daten_liste = []
 favoriten_liste = []
 einstiegs_liste = []
 st_alarm_ausloesen = False
 aktueller_zeitstempel = time.time()
 
-# Wir scannen NUR noch Ihre persönlichen Favoriten -> Extrem schnell & sicher vor Sperren!
-for t in st.session_state.meine_favoriten:
+# Wir laden alle Coins stabil über yfinance
+for t in alle_aktiven_tickers:
     raw_df = daten_laden(t, gewaehlte_periode, gewaehltes_intervall)
     if raw_df is None or len(raw_df) < 2: continue
     df = indikatoren_berechnen(raw_df.copy())
@@ -122,7 +114,11 @@ for t in st.session_state.meine_favoriten:
     else:
         sig_txt = "📉 EINSTEIGEN SHORT" if (vor_close >= vor_ema and pr < ema) else "⏳ ABGEFAHREN"
         
-    favoriten_liste.append({"Ticker": t, "Preis ($)": round(pr, 4 if pr < 1 else 2), "Änderung (%)": round(chg, 2), "Trading Signal": sig_txt})
+    item_daten = {"Ticker": t, "Preis ($)": round(pr, 4 if pr < 1 else 2), "Änderung (%)": round(chg, 2), "Trading Signal": sig_txt, "raw_pr": pr, "raw_atr": atr, "raw_sma": sma}
+    daten_liste.append(item_daten)
+    
+    if t in st.session_state.meine_favoriten:
+        favoriten_liste.append(item_daten)
 
     if "EINSTEIGEN" in sig_txt:
         sl_u = pr - (2 * atr) if pr > sma else pr + (2 * atr)
@@ -138,68 +134,67 @@ for t in st.session_state.meine_favoriten:
             send_telegram_message(msg)
             st.session_state.gesendete_alarme[coin_key] = aktueller_zeitstempel
 
-if st_alarm_ausloesen:
-    st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/wav"></audio>""", height=0)
+if daten_liste:
+    global_df = pd.DataFrame(daten_liste)
+    basis_df = global_df[global_df["Ticker"].isin(basis_tickers)]
+    global_gewinner = basis_df.sort_values(by="Änderung (%)", ascending=False).head(10)
+    global_verlierer = basis_df.sort_values(by="Änderung (%)", ascending=True).head(10)
 
-col_links, col_rechts = st.columns(2)
-with col_links:
-    st.subheader(f"🟩 Globale Krypto Top-Gewinner ({interval_auswahl})")
-    st.dataframe(global_df, use_container_width=True, hide_index=True)
-    st.markdown("---")
-    st.subheader("📋 Meine persönlichen Krypto-Favoriten")
-    if favoriten_liste:
-        st.dataframe(pd.DataFrame(favoriten_liste), use_container_width=True, hide_index=True)
-    else:
-        st.info("💡 Deine Liste ist aktuell leer oder lädt Daten...")
-    st.markdown("---")
-    
-    st.subheader("📊 Live-Chartstation")
-    chart_liste = list(st.session_state.meine_favoriten)
-    ausgewaehlter_coin = st.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
-    st.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
-    
-    cdf = daten_laden(ausgewaehlter_coin, gewaehlte_periode, gewaehltes_intervall)
-    if cdf is not None and len(cdf) >= 2:
-        cdf = indikatoren_berechnen(cdf)
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
-        fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
-        fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
+    if st_alarm_ausloesen:
+        st.components.v1.html("""<audio autoplay><source src="https://mixkit.co" type="audio/wav"></audio>""", height=0)
+
+    col_links, col_rechts = st.columns(2)
+    with col_links:
+        st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
+        st.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader("📋 Meine persönlichen Krypto-Favoriten")
+        if favoriten_liste:
+            st.dataframe(pd.DataFrame(favoriten_liste)[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
+        else:
+            st.info("💡 Deine Liste ist aktuell leer.")
+        st.markdown("---")
         
-        try:
-            c_pr = float(cdf['Close'].iloc[-1])
-            high_low = cdf['High'] - cdf['Low']
-            high_close = np.abs(cdf['High'] - cdf['Close'].shift())
-            low_close = np.abs(cdf['Low'] - cdf['Close'].shift())
-            c_atr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(window=14).mean().bfill().iloc[-1]
-            c_sma = float(cdf['SMA_200'].iloc[-1])
-            
-            sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
-            tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
-            
-            fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
-            fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=sl_u, y1=sl_u, line=dict(color="#ea4335", width=1.5, dash="dash"))
-            fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=tp_u, y1=tp_u, line=dict(color="#0ECB81", width=1.5, dash="dash"))
-        except: pass
+        st.subheader("📊 Live-Chartstation")
+        chart_liste = list(global_df["Ticker"].unique())
+        ausgewaehlter_coin = st.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
+        st.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USD ({interval_auswahl})**")
         
-        fig.update_layout(
-            template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", 
-            xaxis=dict(rangeslider=dict(visible=False)), dragmode="pan"
-        )
-        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+        cdf = daten_laden(ausgewaehlter_coin, gewaehlte_periode, gewaehltes_intervall)
+        if cdf is not None and len(cdf) >= 2:
+            cdf = indikatoren_berechnen(cdf)
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
+            
+            try:
+                c_pr = float(cdf['Close'].iloc[-1])
+                high_low = cdf['High'] - cdf['Low']
+                high_close = np.abs(cdf['High'] - cdf['Close'].shift())
+                low_close = np.abs(cdf['Low'] - cdf['Close'].shift())
+                c_atr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(window=14).mean().bfill().iloc[-1]
+                c_sma = float(cdf['SMA_200'].iloc[-1])
+                
+                sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+                tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
+                
+                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=sl_u, y1=sl_u, line=dict(color="#ea4335", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=tp_u, y1=tp_u, line=dict(color="#0ECB81", width=1.5, dash="dash"))
+            except: pass
+            
+            fig.update_layout(
+                template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", 
+                xaxis=dict(rangeslider=dict(visible=False)), dragmode="pan"
+            )
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
 with col_rechts:
-    st.subheader(f"🟥 Globale Krypto Top-Verlierer ({interval_auswahl})")
-    st.dataframe(global_df, use_container_width=True, hide_index=True)
+    st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
+    st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
     st.markdown("---")
     st.subheader(f"🔥 AKTUELLE COINS IM LIVE-EINSTIEG ({interval_auswahl})")
     if einstiegs_liste:
         df_einstieg = pd.DataFrame(einstiegs_liste)
         dynamische_hoehe = min(350, 40 + len(df_einstieg) * 35)
-        st.dataframe(df_einstieg, use_container_width=True, hide_index=True, height=dynamische_hoehe)
-    else:
-        st.info("💡 Alle Züge aktuell abgefahren.")
-
-# Sicherer 5-Sekunden Takt für yfinance in der Cloud
-time.sleep(5)
-st.rerun()
