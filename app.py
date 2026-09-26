@@ -22,14 +22,12 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Cache für bereits gesendete Alarme initialisieren, damit Ihr Handy nicht zugespamt wird
 if "gesendete_alarme" not in st.session_state:
     st.session_state.gesendete_alarme = {}
 
 if "meine_favoriten" not in st.session_state:
     st.session_state.meine_favoriten = ["BTC", "ETH"]
 
-# Hintergrund-Funktion für Telegram-Push
 def send_telegram_message(message):
     try:
         token = st.secrets["TELEGRAM_TOKEN"]
@@ -130,10 +128,9 @@ if daten_liste:
             richtung_icon = "🚀 LONG" if c_pr > c_sma else "📉 SHORT"
             einstiegs_liste.append({"Ticker": row["Ticker"], "Richtung": richtung_icon, "Einstieg ($)": round(c_pr, 2), "🛑 SL ($)": round(sl_u, 2), "🎯 TP ($)": round(tp_u, 2)})
             
-            # Telegram Alarm Logik ausführen
             coin_key = f"{row['Ticker']}_{richtung_icon}"
             letzter_send_zeitpunkt = st.session_state.gesendete_alarme.get(coin_key, 0)
-            if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:  # 15 Minuten Spam-Schutz
+            if aktueller_zeitstempel - letzter_send_zeitpunkt > 900:
                 msg = f"🔔 *NEUES TRADING SIGNAL*\n\n🪙 *Coin:* {row['Ticker']}-USD\n📊 *Richtung:* {richtung_icon}\n💵 *Einstieg:* ${round(c_pr, 2)}\n🛑 *SL:* ${round(sl_u, 2)}\n🎯 *TP:* ${round(tp_u, 2)}\n⏱️ *Intervall:* {interval_auswahl}"
                 send_telegram_message(msg)
                 st.session_state.gesendete_alarme[coin_key] = aktueller_zeitstempel
@@ -163,27 +160,35 @@ if daten_liste:
             fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
             fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
             fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
-            coin_row = global_df[global_df["Ticker"] == ausgewaehlter_coin]
-            if not coin_row.empty:
-                try:
-                    c_pr = float(coin_row["raw_pr"].values[0])
-                    c_atr = float(coin_row["raw_atr"].values[0])
-                    c_sma = float(coin_row["raw_sma"].values[0])
-                    sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
-                    tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
-                    fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
-                    fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
-                    fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
-                except: pass
             
-            # Wichtig: Verhindert das Abschneiden und aktiviert Ihren gewohnten Maus-Zoom
-            fig.update_layout(template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
+            # Linien werden immer berechnet und sicher eingezeichnet
+            try:
+                c_pr = float(cdf['Close'].iloc[-1])
+                # Berechnung des ATR für die Linien-Abstände
+                high_low = cdf['High'] - cdf['Low']
+                high_close = np.abs(cdf['High'] - cdf['Close'].shift())
+                low_close = np.abs(cdf['Low'] - cdf['Close'].shift())
+                c_atr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(window=14).mean().bfill().iloc[-1]
+                c_sma = float(cdf['SMA_200'].iloc[-1])
+                
+                sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+                tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
+                
+                fig.add_hline(y=c_pr, line_dash="dash", line_color="#2B6CB0", annotation_text="EINSTIEG")
+                fig.add_hline(y=sl_u, line_dash="dash", line_color="#ea4335", annotation_text="🛑 SL")
+                fig.add_hline(y=tp_u, line_dash="dash", line_color="#0ECB81", annotation_text="🎯 TP")
+            except: pass
+            
+            # dragmode="pan" aktiviert das flüssige Verschieben (rauf/runter/links/rechts) mit der Maus
+            fig.update_layout(
+                template="plotly_dark", 
+                paper_bgcolor="#181A20", 
+                plot_bgcolor="#181A20", 
+                xaxis=dict(rangeslider=dict(visible=False)),
+                dragmode="pan"
+            )
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
     with col_rechts:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
         st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
-        st.markdown("---")
-        st.subheader(f"🔥 AKTUELLE COINS IM LIVE-EINSTIEG ({interval_auswahl})")
-        if einstiegs_liste:
-            st.dataframe(pd.DataFrame(einstiegs_liste), use_container_width=True, hide_index=True)
