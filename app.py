@@ -170,9 +170,9 @@ if daten_liste:
                 sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
                 tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
                 
-                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
-                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=sl_u, y1=sl_u, line=dict(color="#ea4335", width=1.5, dash="dash"))
-                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=tp_u, y1=tp_u, line=dict(color="#0ECB81", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=sl_u, y1=sl_u, line=dict(color="#ea4335", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=tp_u, y1=tp_u, line=dict(color="#0ECB81", width=1.5, dash="dash"))
             except: pass
             
             fig.update_layout(
@@ -182,7 +182,8 @@ if daten_liste:
                 xaxis=dict(rangeslider=dict(visible=False)),
                 dragmode="pan"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            # Hier zwingen wir das Mausrad-Scrollen wieder aktiv zu sein!
+            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
     with col_rechts:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
@@ -190,7 +191,6 @@ if daten_liste:
         st.markdown("---")
         st.subheader(f"🔥 AKTUELLE COINS IM LIVE-EINSTIEG ({interval_auswahl})")
         
-        # Dynamische Anpassung: Wenn Einträge da sind, wächst die Tabelle exakt mit
         if einstiegs_liste:
             df_einstieg = pd.DataFrame(einstiegs_liste)
-            # Berechnet die Höhe dynamisch anhand der Zeilenanzahl (z.B. 3 Zeilen = flacher Kasten)
+            dynamische_hoehe = min(350, 40 + len(df_einstieg) * 35)
