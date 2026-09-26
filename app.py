@@ -15,7 +15,8 @@ st.markdown("""
     <style>
     .stApp { background-color: #0B0E11; color: #EAECEF; }
     h1, h2, h3, h4 { color: #EAECEF !important; margin-bottom: 2px !important; margin-top: 5px !important; }
-    div[data-testid="stDataFrame"] > div { max-height: none !important; height: 350px !important; }
+    /* Nur die Top-10 Listen und Favoriten haben eine feste Höhe mit Scrollbalken */
+    div[data-testid="stDataFrame"] { max-height: 350px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -169,9 +170,9 @@ if daten_liste:
                 sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
                 tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
                 
-                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
-                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=sl_u, y1=sl_u, line=dict(color="#ea4335", width=1.5, dash="dash"))
-                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=tp_u, y1=tp_u, line=dict(color="#0ECB81", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=sl_u, y1=sl_u, line=dict(color="#ea4335", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=tp_u, y1=tp_u, line=dict(color="#0ECB81", width=1.5, dash="dash"))
             except: pass
             
             fig.update_layout(
@@ -181,15 +182,15 @@ if daten_liste:
                 xaxis=dict(rangeslider=dict(visible=False)),
                 dragmode="pan"
             )
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+            st.plotly_chart(fig, use_container_width=True)
 
     with col_rechts:
         st.subheader(f"🟥 Globale Binance Top-10 Verlierer ({interval_auswahl})")
         st.dataframe(global_verlierer[["Ticker", "Preis ($)", "Änderung (%)", "Trading Signal"]], use_container_width=True, hide_index=True)
         st.markdown("---")
         st.subheader(f"🔥 AKTUELLE COINS IM LIVE-EINSTIEG ({interval_auswahl})")
+        
+        # Dynamische Anpassung: Wenn Einträge da sind, wächst die Tabelle exakt mit
         if einstiegs_liste:
-            st.dataframe(pd.DataFrame(einstiegs_liste), use_container_width=True, hide_index=True)
-        else:
-            leeres_df = pd.DataFrame(columns=["Ticker", "Richtung", "Einstieg ($)", "🛑 SL ($)", "🎯 TP ($)"])
-            st.dataframe(leeres_df, use_container_width=True, hide_index=True)
+            df_einstieg = pd.DataFrame(einstiegs_liste)
+            # Berechnet die Höhe dynamisch anhand der Zeilenanzahl (z.B. 3 Zeilen = flacher Kasten)
