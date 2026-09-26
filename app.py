@@ -24,7 +24,6 @@ if "gesendete_alarme" not in st.session_state:
 if "meine_favoriten" not in st.session_state:
     st.session_state.meine_favoriten = ["BTC", "ETH"]
 
-# Cache für die Hauptdaten (verhindert das Blockieren durch Binance)
 if "letzter_ki_scan" not in st.session_state:
     st.session_state.letzter_ki_scan = 0
 
@@ -38,22 +37,19 @@ def send_telegram_message(message):
     except:
         pass
 
-@st.cache_data(ttl=2)
-def binance_daten_laden(ticker, intervall, limit=210):
+# Lädt historische Kerzen für den Chart und die Indikatoren einzeln (sehr sparsam)
+def binance_kerzen_laden(ticker, intervall, limit=210):
     try:
         symbol = f"{ticker.upper()}USDT"
         binance_intervals = {"1 Minute": "1m", "5 Minuten": "5m", "15 Minuten": "15m", "1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d"}
         bi = binance_intervals.get(intervall, "1d")
-        
         url = f"https://binance.com{symbol}&interval={bi}&limit={limit}"
         res = requests.get(url, timeout=2).json()
-        
         df = pd.DataFrame(res, columns=[
             'Open_time', 'Open', 'High', 'Low', 'Close', 'Volume',
             'Close_time', 'Quote_asset_volume', 'Number_of_trades',
             'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'
         ])
-        
         df['Open'] = df['Open'].astype(float)
         df['High'] = df['High'].astype(float)
         df['Low'] = df['Low'].astype(float)
@@ -108,73 +104,55 @@ einstiegs_liste = []
 st_alarm_ausloesen = False
 aktueller_zeitstempel = time.time()
 
-# KI-Hintergrundscanner wird zeitlich entzerrt (scannt alle 30 Sekunden im Hintergrund, um API-Sperren zu verhindern)
-ki_soll_scannen = False
-if aktueller_zeitstempel - st.session_state.letzter_ki_scan > 30:
-    ki_soll_scannen = True
-    st.session_state.letzter_ki_scan = aktueller_zeitstempel
+# EINE EINZIGE ANFRAGE für alle Live-Preise der Top-10 (Verhindert jede Blockade!)
+try:
+    ticker_res = requests.get("https://binance.com", timeout=2).json()
+    ticker_dict = {item['symbol']: item for item in ticker_res if item['symbol'].endswith('USDT')}
+except:
+    ticker_dict = {}
 
-hintergrund_zeiteinheiten = ["1 Minute", "5 Minuten", "15 Minuten", "1 Stunde"]
-
-# Durchlauf für Berechnungen und Anzeigen
+# 1. SICHTBARE GEWINNER / VERLIERER TABELLEN GENERIEREN
 for t in alle_aktiven_tickers:
-    # Haupt-Daten für die sichtbare Anzeige laden
-    df_sichtbar = binance_daten_laden(t, interval_auswahl, limit=205)
+    sym = f"{t}USDT"
+    if sym in ticker_dict:
+        live_data = ticker_dict[sym]
+        s_pr = float(live_data['lastPrice'])
+        s_chg = float(live_data['priceChangePercent'])
+        daten_liste.append({"Ticker": t, "Preis ($)": round(s_pr, 4 if s_pr < 1 else 2), "Änderung (%)": round(s_chg, 2), "Trading Signal": "⏳ LIVE SCANNEN"})
+
+# 2. DYNAMISCHER EINSTIEGS-SCANNER FÜR DIE ABLAGE
+# Scannt die Indikatoren für den Live-Einstieg sehr sparsam im Hintergrund
+for t in st.session_state.meine_favoriten:
+    df_sichtbar = binance_kerzen_laden(t, interval_auswahl, limit=205)
     if df_sichtbar is None or len(df_sichtbar) < 3: continue
     df_sichtbar = indikatoren_berechnen(df_sichtbar)
     
-    s_pr = df_sichtbar['Close'].iloc[-1]
-    s_sma = df_sichtbar['SMA_200'].iloc[-1]
-    s_ema = df_sichtbar['EMA_20'].iloc[-1]
-    s_vor_close = df_sichtbar['Close'].iloc[-2]
-    s_vor_ema = df_sichtbar['EMA_20'].iloc[-2]
-    s_chg = ((s_pr - s_vor_close) / s_vor_close) * 100.0
-    s_atr = df_sichtbar['ATR'].iloc[-1] if df_sichtbar['ATR'].iloc[-1] != 0 else s_pr * 0.02
+    pr = df_sichtbar['Close'].iloc[-1]
+    sma = df_sichtbar['SMA_200'].iloc[-1]
+    ema = df_sichtbar['EMA_20'].iloc[-1]
+    vor_close = df_sichtbar['Close'].iloc[-2]
+    vor_ema = df_sichtbar['EMA_20'].iloc[-2]
+    atr = df_sichtbar['ATR'].iloc[-1] if df_sichtbar['ATR'].iloc[-1] != 0 else pr * 0.02
     
-    if s_pr > s_sma:
-        s_sig_txt = "🚀 EINSTEIGEN LONG" if (s_vor_close <= s_vor_ema and s_pr > s_ema) else "⏳ ABGEFAHREN"
-    else:
-        s_sig_txt = "📉 EINSTEIGEN SHORT" if (s_vor_close >= s_vor_ema and s_pr < s_ema) else "⏳ ABGEFAHREN"
+    sig = None
+    if pr > sma and vor_close <= vor_ema and pr > ema:
+        sig = "🚀 LONG"
+    elif pr < sma and vor_close >= vor_ema and pr < ema:
+        sig = "📉 SHORT"
         
-    daten_liste.append({"Ticker": t, "Preis ($)": round(s_pr, 4 if s_pr < 1 else 2), "Änderung (%)": round(s_chg, 2), "Trading Signal": s_sig_txt})
-
-    # Wenn der Coin auf der aktuell gewählten Zeiteinheit ein Signal hat, kommt er direkt in die Tabelle
-    if "EINSTEIGEN" in s_sig_txt:
-        s_sl = s_pr - (2 * s_atr) if "LONG" in s_sig_txt else s_pr + (2 * s_atr)
-        s_tp = s_pr + (3 * s_atr) if "LONG" in s_sig_txt else s_pr - (3 * s_atr)
+    if sig:
+        sl = pr - (2 * atr) if "LONG" in sig else pr + (2 * atr)
+        tp = pr + (3 * atr) if "LONG" in sig else pr - (3 * atr)
         st_alarm_ausloesen = True
-        richtungs_icon = "🚀 LONG" if "LONG" in s_sig_txt else "📉 SHORT"
-        einstiegs_liste.append({"Ticker": t, "Richtung": richtungs_icon, "Einstieg ($)": round(s_pr, 2), "🛑 SL ($)": round(s_sl, 2), "🎯 TP ($)": round(s_tp, 2)})
-
-    # KI-Multi-Hintergrund-Scanner für Telegram (läuft zeitlich gedrosselt im Hintergrund mit)
-    if ki_soll_scannen:
-        for hz in hintergrund_zeiteinheiten:
-            if hz == interval_auswahl: continue # Wurde oben schon geprüft
-            hdf = binance_daten_laden(t, hz, limit=25)
-            if hdf is None or len(hdf) < 3: continue
-            hdf = indikatoren_berechnen(hdf)
-            h_pr = hdf['Close'].iloc[-1]
-            h_sma = hdf['SMA_200'].iloc[-1]
-            h_ema = hdf['EMA_20'].iloc[-1]
-            h_vor_close = hdf['Close'].iloc[-2]
-            h_vor_ema = hdf['EMA_20'].iloc[-2]
-            h_atr = hdf['ATR'].iloc[-1] if hdf['ATR'].iloc[-1] != 0 else h_pr * 0.02
-            
-            h_sig = None
-            if h_pr > h_sma and h_vor_close <= h_vor_ema and h_pr > h_ema:
-                h_sig = "🚀 LONG"
-            elif h_pr < h_sma and h_vor_close >= h_vor_ema and h_pr < h_ema:
-                h_sig = "📉 SHORT"
-                
-            if h_sig:
-                h_sl = h_pr - (2 * h_atr) if "LONG" in h_sig else h_pr + (2 * h_atr)
-                h_tp = h_pr + (3 * h_atr) if "LONG" in h_sig else h_pr - (3 * h_atr)
-                alarm_schluessel = f"{t}_{h_sig}_{hz}"
-                letzter_alarm = st.session_state.gesendete_alarme.get(alarm_schluessel, 0)
-                if aktueller_zeitstempel - letzter_alarm > 900:
-                    msg = f"🔔 *KI-RADAR EINSTEIGEN!*\n\n🪙 *Coin:* {t}-USDT\n⏱️ *Zeiteinheit:* {hz}\n🚦 *Richtung:* {h_sig}\n💵 *Einstieg:* ${round(h_pr, 2)}\n🛑 *SL:* ${round(h_sl, 2)}\n🎯 *TP:* ${round(h_tp, 2)}"
-                    send_telegram_message(msg)
-                    st.session_state.gesendete_alarme[alarm_schluessel] = aktueller_zeitstempel
+        einstiegs_liste.append({"Ticker": t, "Richtung": sig, "Einstieg ($)": round(pr, 2), "🛑 SL ($)": round(sl, 2), "🎯 TP ($)": round(tp, 2)})
+        
+        # Telegram-Alarm abfeuern
+        alarm_schluessel = f"{t}_{sig}_{interval_auswahl}"
+        letzter_alarm = st.session_state.gesendete_alarme.get(alarm_schluessel, 0)
+        if aktueller_zeitstempel - letzter_alarm > 900:
+            msg = f"🔔 *LIVE-EINSTIEG GEFUNDEN!*\n\n🪙 *Coin:* {t}-USDT\n🚦 *Richtung:* {sig}\n💵 *Einstieg:* ${round(pr, 2)}\n🛑 *SL:* ${round(sl, 2)}\n🎯 *TP:* ${round(tp, 2)}\n⏱️ *Zeiteinheit:* {interval_auswahl}"
+            send_telegram_message(msg)
+            st.session_state.gesendete_alarme[alarm_schluessel] = aktueller_zeitstempel
 
 if daten_liste:
     global_df = pd.DataFrame(daten_liste)
@@ -188,22 +166,39 @@ if daten_liste:
 
     col_links, col_rechts = st.columns(2)
     with col_links:
-        st.subheader(f"🟩 Globale Binance Top-10 Gewinner ({interval_auswahl})")
-        st.dataframe(global_gewinner, use_container_width=True, hide_index=True)
+        st.subheader(f"🟩 Globale Binance Top-10 Gewinner (24h)")
+        st.dataframe(global_gewinner[["Ticker", "Preis ($)", "Änderung (%)"]], use_container_width=True, hide_index=True)
         st.markdown("---")
         st.subheader("📋 Meine persönlichen Krypto-Favoriten")
         if not favoriten_df.empty:
-            st.dataframe(favoriten_df, use_container_width=True, hide_index=True)
+            st.dataframe(favoriten_df[["Ticker", "Preis ($)", "Änderung (%)"]], use_container_width=True, hide_index=True)
         else:
             st.info("💡 Deine Liste ist aktuell leer.")
         st.markdown("---")
         
+        # Live-Chartstation
         st.subheader("📊 Live-Chartstation")
         chart_liste = list(global_df["Ticker"].unique())
         ausgewaehlter_coin = st.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
         st.markdown(f"**Aktuell geladen: {ausgewaehlter_coin}-USDT ({interval_auswahl})**")
         
-        cdf = binance_daten_laden(ausgewaehlter_coin, interval_auswahl, limit=100)
+        cdf = binance_kerzen_laden(ausgewaehlter_coin, interval_auswahl, limit=100)
         if cdf is not None and len(cdf) >= 2:
             cdf = indikatoren_berechnen(cdf)
             fig = go.Figure()
+            fig.add_trace(go.Candlestick(x=cdf.index, open=cdf['Open'], high=cdf['High'], low=cdf['Low'], close=cdf['Close'], name="Kurs"))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['SMA_200'], mode='lines', name='SMA 200', line=dict(color='#ea4335', width=1.5)))
+            fig.add_trace(go.Scatter(x=cdf.index, y=cdf['EMA_20'], mode='lines', name='EMA 20', line=dict(color='#0ECB81', width=1.5)))
+            
+            try:
+                c_pr = float(cdf['Close'].iloc[-1])
+                high_low = cdf['High'] - cdf['Low']
+                high_close = np.abs(cdf['High'] - cdf['Close'].shift())
+                low_close = np.abs(cdf['Low'] - cdf['Close'].shift())
+                c_atr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(window=14).mean().bfill().iloc[-1]
+                c_sma = float(cdf['SMA_200'].iloc[-1])
+                
+                sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
+                tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
+                
+                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
