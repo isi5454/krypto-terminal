@@ -24,9 +24,6 @@ if "gesendete_alarme" not in st.session_state:
 if "meine_favoriten" not in st.session_state:
     st.session_state.meine_favoriten = ["BTC", "ETH"]
 
-if "letzter_ki_scan" not in st.session_state:
-    st.session_state.letzter_ki_scan = 0
-
 def send_telegram_message(message):
     try:
         token = st.secrets["TELEGRAM_TOKEN"]
@@ -37,7 +34,6 @@ def send_telegram_message(message):
     except:
         pass
 
-# Lädt historische Kerzen für den Chart und die Indikatoren einzeln (sehr sparsam)
 def binance_kerzen_laden(ticker, intervall, limit=210):
     try:
         symbol = f"{ticker.upper()}USDT"
@@ -104,14 +100,12 @@ einstiegs_liste = []
 st_alarm_ausloesen = False
 aktueller_zeitstempel = time.time()
 
-# EINE EINZIGE ANFRAGE für alle Live-Preise der Top-10 (Verhindert jede Blockade!)
 try:
     ticker_res = requests.get("https://binance.com", timeout=2).json()
     ticker_dict = {item['symbol']: item for item in ticker_res if item['symbol'].endswith('USDT')}
 except:
     ticker_dict = {}
 
-# 1. SICHTBARE GEWINNER / VERLIERER TABELLEN GENERIEREN
 for t in alle_aktiven_tickers:
     sym = f"{t}USDT"
     if sym in ticker_dict:
@@ -120,8 +114,6 @@ for t in alle_aktiven_tickers:
         s_chg = float(live_data['priceChangePercent'])
         daten_liste.append({"Ticker": t, "Preis ($)": round(s_pr, 4 if s_pr < 1 else 2), "Änderung (%)": round(s_chg, 2), "Trading Signal": "⏳ LIVE SCANNEN"})
 
-# 2. DYNAMISCHER EINSTIEGS-SCANNER FÜR DIE ABLAGE
-# Scannt die Indikatoren für den Live-Einstieg sehr sparsam im Hintergrund
 for t in st.session_state.meine_favoriten:
     df_sichtbar = binance_kerzen_laden(t, interval_auswahl, limit=205)
     if df_sichtbar is None or len(df_sichtbar) < 3: continue
@@ -146,7 +138,6 @@ for t in st.session_state.meine_favoriten:
         st_alarm_ausloesen = True
         einstiegs_liste.append({"Ticker": t, "Richtung": sig, "Einstieg ($)": round(pr, 2), "🛑 SL ($)": round(sl, 2), "🎯 TP ($)": round(tp, 2)})
         
-        # Telegram-Alarm abfeuern
         alarm_schluessel = f"{t}_{sig}_{interval_auswahl}"
         letzter_alarm = st.session_state.gesendete_alarme.get(alarm_schluessel, 0)
         if aktueller_zeitstempel - letzter_alarm > 900:
@@ -176,7 +167,6 @@ if daten_liste:
             st.info("💡 Deine Liste ist aktuell leer.")
         st.markdown("---")
         
-        # Live-Chartstation
         st.subheader("📊 Live-Chartstation")
         chart_liste = list(global_df["Ticker"].unique())
         ausgewaehlter_coin = st.selectbox("🎯 Coin wählen:", chart_liste, key="chart_box")
@@ -201,4 +191,13 @@ if daten_liste:
                 sl_u = c_pr - (2 * c_atr) if c_pr > c_sma else c_pr + (2 * c_atr)
                 tp_u = c_pr + (3 * c_atr) if c_pr > c_sma else c_pr - (3 * c_atr)
                 
-                fig.add_shape(type="line", x0=cdf.index, x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=c_pr, y1=c_pr, line=dict(color="#2B6CB0", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=sl_u, y1=sl_u, line=dict(color="#ea4335", width=1.5, dash="dash"))
+                fig.add_shape(type="line", x0=cdf.index[0], x1=cdf.index[-1], y0=tp_u, y1=tp_u, line=dict(color="#0ECB81", width=1.5, dash="dash"))
+            except:
+                pass
+            
+            fig.update_layout(
+                template="plotly_dark", paper_bgcolor="#181A20", plot_bgcolor="#181A20", 
+                xaxis=dict(rangeslider=dict(visible=False)), dragmode="pan"
+            )
